@@ -111,14 +111,19 @@ and enable the provider you want. Installation, login, and configuration belong
 to that environment's machine, even when you connect from a phone or another
 computer.
 
-| Provider    | Install and authenticate                                                                     |
-| ----------- | -------------------------------------------------------------------------------------------- |
-| Codex       | Install [Codex CLI](https://developers.openai.com/codex/cli), then run `codex login`.        |
-| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`. |
-| Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                        |
-| Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                           |
-| OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                     |
-| Antigravity | Install and sign in with Google from T3 Code's provider settings.                            |
+| Provider    | Install and authenticate                                                                           |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| Codex       | Install [Codex CLI](https://developers.openai.com/codex/cli), then run `codex login`.              |
+| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.       |
+| Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                              |
+| Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                 |
+| OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                           |
+| Kilo Code   | Install [Kilo CLI](https://github.com/Kilo-Org/kilocode#installation), then run `kilo` to sign in. |
+| Antigravity | Install and sign in with Google from T3 Code's provider settings.                                  |
+
+Kilo Code requires CLI 7.4.23 or newer. T3 Code uses its ACP session for chat and
+approvals. Kilo threads do not support conversation rollback; choose another
+provider for automatic thread titles and source control writing.
 
 Provider CLIs must be on the server's `PATH`. If T3 Code cannot find one, set its
 **Binary path** in provider settings, especially when using a version manager.

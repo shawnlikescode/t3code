@@ -646,6 +646,20 @@ export function getAntigravitySendBlockReason(
   return null;
 }
 
+export function getProviderSendBlockReason(
+  provider: ServerProvider | null | undefined,
+  model: string,
+): string | null {
+  if (provider?.hasAuthoritativeModelCatalog === true) {
+    if (provider.status !== "ready")
+      return `Checking ${provider.displayName ?? "provider"} models...`;
+    if (!provider.models.some((entry) => entry.slug === model)) {
+      return "That model is no longer available. Choose another model.";
+    }
+  }
+  return getAntigravitySendBlockReason(provider, model);
+}
+
 export function buildRunningThreadTurnInterruptInput(
   thread: Pick<Thread, "id" | "session"> | null | undefined,
   phase: SessionPhase,

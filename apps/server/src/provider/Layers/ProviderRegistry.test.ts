@@ -2645,6 +2645,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "codex",
                 "cursor",
                 "grok",
+                "kilo",
                 "opencode",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);

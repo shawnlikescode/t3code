@@ -1,15 +1,39 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
+  applyProviderInstanceSettingsToSnapshots,
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
+  hasSelectableTextGenerationProviderSelection,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
+  NO_PROVIDER_MODEL_SELECTION,
   resolveDefaultProviderModelSelection,
   resolveSelectableProviderInstance,
 } from "./providerInstances";
+import { resolveAppModelSelectionState } from "./modelSelection";
+
+describe("hasSelectableTextGenerationProviderSelection", () => {
+  it("uses catalog presence so a legitimate empty-catalog instance cannot collide", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "t3code_no_provider",
+        models: [],
+      }),
+    ]);
+
+    expect(hasSelectableTextGenerationProviderSelection(NO_PROVIDER_MODEL_SELECTION, [])).toBe(
+      false,
+    );
+    expect(hasSelectableTextGenerationProviderSelection(NO_PROVIDER_MODEL_SELECTION, entries)).toBe(
+      true,
+    );
+  });
+});
 
 function provider(input: {
   provider: ProviderDriverKind;
@@ -20,6 +44,7 @@ function provider(input: {
   accentColor?: string;
   status?: ServerProvider["status"];
   models?: ServerProvider["models"];
+  hasAuthoritativeModelCatalog?: boolean;
 }): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make(input.instanceId),
@@ -31,6 +56,9 @@ function provider(input: {
     version: null,
     status: input.status ?? "ready",
     ...(input.availability ? { availability: input.availability } : {}),
+    ...(input.hasAuthoritativeModelCatalog !== undefined
+      ? { hasAuthoritativeModelCatalog: input.hasAuthoritativeModelCatalog }
+      : {}),
     auth: { status: "authenticated" },
     checkedAt: "2026-01-01T00:00:00.000Z",
     models: input.models ?? [],
@@ -45,6 +73,137 @@ const model = (slug: string, isCustom = false, isDefault = false) => ({
   isCustom,
   ...(isDefault ? { isDefault: true } : {}),
   capabilities: {},
+});
+
+describe("applyProviderInstanceSettingsToSnapshots", () => {
+  it("uses an enabled setting while the streamed snapshot still reports disabled", () => {
+    const instanceId = ProviderInstanceId.make("t3code_no_provider");
+    const driver = ProviderDriverKind.make("codex");
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_UNIFIED_SETTINGS.providerInstances,
+        [instanceId]: { driver, enabled: true },
+      },
+      textGenerationModelSelection: { instanceId, model: "openai/gpt-5.5" },
+    };
+    const providers = [
+      provider({
+        provider: driver,
+        instanceId,
+        enabled: false,
+        models: [model("openai/gpt-5.5")],
+      }),
+    ];
+
+    const effectiveProviders = applyProviderInstanceSettingsToSnapshots(providers, settings);
+    expect(effectiveProviders[0]?.enabled).toBe(true);
+    expect(resolveAppModelSelectionState(settings, effectiveProviders)).toMatchObject({
+      instanceId,
+      model: "openai/gpt-5.5",
+    });
+  });
+
+  it("uses a disabled setting while the streamed snapshot still reports enabled", () => {
+    const instanceId = ProviderInstanceId.make("codex");
+    const driver = ProviderDriverKind.make("codex");
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_UNIFIED_SETTINGS.providerInstances,
+        [instanceId]: { driver, enabled: false },
+      },
+      textGenerationModelSelection: { instanceId, model: "openai/gpt-5.5" },
+    };
+    const providers = [
+      provider({
+        provider: driver,
+        instanceId,
+        enabled: true,
+        models: [model("openai/gpt-5.5")],
+      }),
+    ];
+
+    const effectiveProviders = applyProviderInstanceSettingsToSnapshots(providers, settings);
+    expect(effectiveProviders[0]?.enabled).toBe(false);
+    expect(resolveAppModelSelectionState(settings, effectiveProviders)).toEqual(
+      NO_PROVIDER_MODEL_SELECTION,
+    );
+  });
+
+  it("disables a stale snapshot when the same instance id was recreated under another driver", () => {
+    const instanceId = ProviderInstanceId.make("shared_work");
+    const oldDriver = ProviderDriverKind.make("codex");
+    const replacementDriver = ProviderDriverKind.make("claudeAgent");
+    const oldSelection = { instanceId, model: "openai/old-catalog-model" };
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_UNIFIED_SETTINGS.providerInstances,
+        [instanceId]: { driver: replacementDriver, enabled: true },
+      },
+      textGenerationModelSelection: oldSelection,
+    };
+    const providers = [
+      provider({
+        provider: oldDriver,
+        instanceId,
+        enabled: true,
+        models: [model(oldSelection.model)],
+      }),
+    ];
+
+    const effectiveProviders = applyProviderInstanceSettingsToSnapshots(providers, settings);
+    expect(effectiveProviders[0]).toMatchObject({ driver: oldDriver, enabled: false });
+    expect(resolveAppModelSelectionState(settings, effectiveProviders)).toEqual(
+      NO_PROVIDER_MODEL_SELECTION,
+    );
+    expect(resolveDefaultProviderModelSelection(effectiveProviders, oldSelection)).toBeNull();
+  });
+
+  it("keeps an unavailable snapshot disabled when settings enable it", () => {
+    const unavailableInstanceId = ProviderInstanceId.make("unavailable_writer");
+    const liveInstanceId = ProviderInstanceId.make("live_writer");
+    const codex = ProviderDriverKind.make("codex");
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const unavailableSelection = {
+      instanceId: unavailableInstanceId,
+      model: "openai/unavailable-model",
+    };
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [unavailableInstanceId]: { driver: codex, enabled: true },
+        [liveInstanceId]: { driver: claude, enabled: true },
+      },
+      textGenerationModelSelection: unavailableSelection,
+    };
+    const providers = [
+      provider({
+        provider: codex,
+        instanceId: unavailableInstanceId,
+        enabled: false,
+        availability: "unavailable",
+        models: [model(unavailableSelection.model)],
+      }),
+      provider({
+        provider: claude,
+        instanceId: liveInstanceId,
+        models: [model("anthropic/live-model")],
+      }),
+    ];
+
+    const effectiveProviders = applyProviderInstanceSettingsToSnapshots(providers, settings);
+    const entries = deriveProviderInstanceEntries(effectiveProviders);
+    const unavailableEntry = entries.find((entry) => entry.instanceId === unavailableInstanceId);
+
+    expect(effectiveProviders[0]).toMatchObject({ availability: "unavailable", enabled: false });
+    expect(unavailableEntry && isProviderInstancePickerVisible(unavailableEntry)).toBe(false);
+    expect(resolveAppModelSelectionState(settings, effectiveProviders)).toMatchObject({
+      instanceId: liveInstanceId,
+      model: "anthropic/live-model",
+    });
+  });
 });
 
 describe("isProviderInstancePickerReady", () => {
@@ -447,6 +606,43 @@ describe("resolveDefaultProviderModelSelection", () => {
       instanceId: ProviderInstanceId.make("claudeAgent"),
       model: "custom-model",
       options: [{ id: "effort", value: "high" }],
+    };
+
+    expect(resolveDefaultProviderModelSelection(providers, stored)).toBe(stored);
+  });
+
+  it("heals a stale Kilo model to the live command catalog default", () => {
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("kilo"),
+        instanceId: "kilo",
+        models: [model("kilo/live", false, true), model("kilo/other")],
+        hasAuthoritativeModelCatalog: true,
+      }),
+    ];
+
+    expect(
+      resolveDefaultProviderModelSelection(providers, {
+        instanceId: ProviderInstanceId.make("kilo"),
+        model: "kilo/stale",
+        options: [{ id: "reasoning", value: "high" }],
+      }),
+    ).toEqual({ instanceId: "kilo", model: "kilo/live" });
+  });
+
+  it("preserves a Kilo selection while its live catalog is unavailable", () => {
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("kilo"),
+        instanceId: "kilo",
+        status: "warning",
+        models: [],
+        hasAuthoritativeModelCatalog: true,
+      }),
+    ];
+    const stored = {
+      instanceId: ProviderInstanceId.make("kilo"),
+      model: "kilo/offline",
     };
 
     expect(resolveDefaultProviderModelSelection(providers, stored)).toBe(stored);

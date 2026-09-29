@@ -67,6 +67,8 @@ export interface ServerProviderPresentation {
   readonly reportsContextWindow?: boolean;
   readonly requiresNewThreadForModelChange?: boolean;
   readonly supportsConversationRollback?: boolean;
+  readonly supportsTextGeneration?: boolean;
+  readonly hasAuthoritativeModelCatalog?: boolean;
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -82,14 +84,18 @@ export function isCommandMissingCause(error: unknown): boolean {
   return error instanceof PlatformError.PlatformError && error.reason._tag === "NotFound";
 }
 
-export const spawnAndCollect = (binaryPath: string, command: ChildProcess.Command) =>
+export const spawnAndCollect = (
+  binaryPath: string,
+  command: ChildProcess.Command,
+  options?: { readonly maxOutputBytes?: number },
+) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const child = yield* spawner.spawn(command);
     const [stdout, stderr, exitCode] = yield* Effect.all(
       [
-        collectStreamAsString(child.stdout),
-        collectStreamAsString(child.stderr),
+        collectStreamAsString(child.stdout, { maxBytes: options?.maxOutputBytes }),
+        collectStreamAsString(child.stderr, { maxBytes: options?.maxOutputBytes }),
         child.exitCode.pipe(Effect.map(Number)),
       ],
       { concurrency: "unbounded" },
@@ -228,6 +234,12 @@ export function buildServerProvider(input: {
       : {}),
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
+      : {}),
+    ...(typeof input.presentation.supportsTextGeneration === "boolean"
+      ? { supportsTextGeneration: input.presentation.supportsTextGeneration }
+      : {}),
+    ...(typeof input.presentation.hasAuthoritativeModelCatalog === "boolean"
+      ? { hasAuthoritativeModelCatalog: input.presentation.hasAuthoritativeModelCatalog }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

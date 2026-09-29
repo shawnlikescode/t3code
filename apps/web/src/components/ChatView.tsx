@@ -456,7 +456,7 @@ import {
   resolveBackgroundDraftWorkspaceOptions,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
-  getAntigravitySendBlockReason,
+  getProviderSendBlockReason,
   resolveDraftHeroState,
   findRecordedWorktreeSetup,
   resolveVisibleWorktreeSetup,
@@ -7782,7 +7782,7 @@ export default function ChatView(props: ChatViewProps) {
         setThreadError(threadIdForSend, `Provider for ${selection.model} is unavailable.`);
         return;
       }
-      const providerBlockReason = getAntigravitySendBlockReason(provider.snapshot, selection.model);
+      const providerBlockReason = getProviderSendBlockReason(provider.snapshot, selection.model);
       if (providerBlockReason) {
         setThreadError(threadIdForSend, providerBlockReason);
         return;

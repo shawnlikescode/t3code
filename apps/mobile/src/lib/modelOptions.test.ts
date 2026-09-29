@@ -197,6 +197,28 @@ describe("mobile model options", () => {
     expect(resolveSelectableModelSelection(null, disabled)).toBe(disabled);
   });
 
+  it("waits for Kilo's catalog and heals a stale selection when ready", () => {
+    const selection = { instanceId: ProviderInstanceId.make("kilo"), model: "kilo/stale" };
+    const provider = {
+      instanceId: selection.instanceId,
+      driver: "kilo",
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      hasAuthoritativeModelCatalog: true,
+      models: [{ slug: "__t3_provider_default__", name: "Kilo default", isDefault: true }],
+    };
+    const pending = { providers: [{ ...provider, status: "warning" }] } as unknown as ServerConfig;
+    const ready = { providers: [{ ...provider, status: "ready" }] } as unknown as ServerConfig;
+
+    expect(isModelSelectionUnavailable(pending, selection)).toBe(true);
+    expect(resolveSelectableModelSelection(pending, selection)).toBe(selection);
+    expect(resolveSelectableModelSelection(ready, selection)).toEqual({
+      instanceId: selection.instanceId,
+      model: "__t3_provider_default__",
+    });
+  });
+
   describe("Antigravity selections", () => {
     const selection = {
       instanceId: ProviderInstanceId.make("google_work"),

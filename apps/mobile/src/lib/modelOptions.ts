@@ -74,6 +74,13 @@ export function isModelSelectionUnavailable(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
+  if (provider?.hasAuthoritativeModelCatalog === true) {
+    return (
+      !provider.enabled ||
+      provider.status !== "ready" ||
+      !provider.models.some((model) => model.slug === selection.model)
+    );
+  }
   return (
     driver === "antigravity" &&
     (!provider ||
@@ -104,6 +111,13 @@ export function resolveSelectableModelSelection(
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
   if (driver === "antigravity") {
     return selection;
+  }
+  if (provider?.hasAuthoritativeModelCatalog === true) {
+    if (provider.status !== "ready") return selection;
+    if (provider.models.some((model) => model.slug === selection.model)) return selection;
+    const model =
+      provider.models.find((candidate) => candidate.isDefault)?.slug ?? provider.models[0]?.slug;
+    return model ? { instanceId: selection.instanceId, model } : null;
   }
   return provider &&
     provider.enabled &&

@@ -86,7 +86,7 @@ export interface ProviderInstance {
     ProviderDriverError
   >;
   readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
-  readonly textGeneration: TextGeneration.TextGeneration["Service"];
+  readonly textGeneration: TextGeneration.TextGeneration["Service"] | null;
   readonly auth?: ProviderAuthController;
 }
 

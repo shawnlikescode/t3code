@@ -74,6 +74,19 @@ const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 export const isProviderDriverKind = (value: unknown): value is ProviderDriverKind =>
   isProviderDriverKindValue(value);
 
+const PROVIDER_DRIVERS_WITHOUT_TEXT_GENERATION = new Set<ProviderDriverKind>([
+  ProviderDriverKind.make("kilo"),
+]);
+
+/**
+ * Whether a driver may be used for automatic text generation such as thread
+ * titles and source-control writing. Unknown/fork drivers remain supported by
+ * default; a driver is listed here only when its implementation explicitly
+ * declines the capability.
+ */
+export const providerDriverSupportsTextGeneration = (driver: ProviderDriverKind): boolean =>
+  !PROVIDER_DRIVERS_WITHOUT_TEXT_GENERATION.has(driver);
+
 /**
  * `ProviderInstanceId` — user-defined routing key for a configured provider
  * instance. Same slug rules as `ProviderDriverKind`; branded separately so the

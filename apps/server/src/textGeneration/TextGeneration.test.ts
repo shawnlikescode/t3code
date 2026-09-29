@@ -29,7 +29,7 @@ const makeStubTextGeneration = (
 
 const makeStubInstance = (
   instanceId: ProviderInstanceId,
-  textGeneration: TextGeneration.TextGeneration["Service"],
+  textGeneration: TextGeneration.TextGeneration["Service"] | null,
 ): ProviderInstance =>
   ({
     instanceId,
@@ -173,6 +173,36 @@ describe("TextGeneration.make", () => {
         expect(result.failure._tag).toBe("TextGenerationError");
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
+      }
+    }),
+  );
+
+  it.effect("fails closed when the selected instance does not support text generation", () =>
+    Effect.gen(function* () {
+      const kiloId = ProviderInstanceId.make("kilo");
+      const tg = yield* TextGeneration.make.pipe(
+        Effect.provideService(
+          ProviderInstanceRegistry.ProviderInstanceRegistry,
+          makeStubRegistry([makeStubInstance(kiloId, null)]),
+        ),
+        Effect.provide(
+          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+            resolveLink: () => Effect.die("Kilo text generation must fail before link resolution"),
+          }),
+        ),
+      );
+
+      const result = yield* tg
+        .generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Do not launch a fallback provider",
+          modelSelection: createModelSelection(kiloId, "__t3_provider_default__"),
+        })
+        .pipe(Effect.result);
+
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure.detail).toContain("does not support automatic text generation");
       }
     }),
   );

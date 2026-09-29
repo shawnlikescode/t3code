@@ -90,6 +90,10 @@ export interface AcpSessionRuntimeOptions {
   /** Native cancellation waits for the prompt response and the getEvents consumer to drain. */
   readonly cancelBehavior?: "interrupt" | "wait-for-prompt";
   readonly cancelTimeout?: Duration.Input;
+  readonly cancelTransportTimeout?: Duration.Input;
+  readonly cancelSettleTimeout?: Duration.Input;
+  readonly beforeCancelTransportWrite?: Effect.Effect<void>;
+  readonly beforeCancelSettlementWait?: Effect.Effect<void>;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
@@ -242,7 +246,11 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly prompt: (
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
-      options?: { readonly dispatched?: Deferred.Deferred<void> },
+      options?: {
+        readonly dispatched?: Deferred.Deferred<void>;
+        /** Revalidate queued work after acquiring the prompt permit. */
+        readonly shouldStart?: Effect.Effect<boolean>;
+      },
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
@@ -977,10 +985,27 @@ export const make = (
         return;
       }
 
-      yield* acp.agent.cancel({ sessionId: started.sessionId });
+      const transport = Effect.gen(function* () {
+        yield* options.beforeCancelTransportWrite ?? Effect.void;
+        yield* acp.agent.cancel({ sessionId: started.sessionId });
+      });
+      const transportResult = options.cancelTransportTimeout
+        ? yield* transport.pipe(Effect.timeoutOption(options.cancelTransportTimeout))
+        : yield* transport.pipe(Effect.as(Option.some(undefined)));
+      if (Option.isNone(transportResult)) {
+        const error = new EffectAcpErrors.AcpTransportError({
+          operation: "call-rpc",
+          method: "session/cancel",
+          detail: "The ACP agent did not accept cancellation. Its process was stopped.",
+          cause: undefined,
+        });
+        yield* retireRuntime(error);
+        return yield* error;
+      }
       if (Option.isNone(activePrompt)) {
         return;
       }
+      yield* options.beforeCancelSettlementWait ?? Effect.void;
       const completed = yield* Effect.gen(function* () {
         const result = yield* Fiber.await(activePrompt.value.fiber);
         yield* Deferred.await(activePrompt.value.completed);
@@ -988,7 +1013,11 @@ export const make = (
           yield* drainEvents;
         }
         return result;
-      }).pipe(Effect.timeoutOption(options.cancelTimeout ?? defaultCancelTimeout));
+      }).pipe(
+        Effect.timeoutOption(
+          options.cancelSettleTimeout ?? options.cancelTimeout ?? defaultCancelTimeout,
+        ),
+      );
       if (Option.isNone(completed)) {
         const error = new EffectAcpErrors.AcpTransportError({
           operation: "call-rpc",
@@ -1028,63 +1057,73 @@ export const make = (
       getConfigOptions: Ref.get(configOptionsRef),
       prompt: (payload, promptOptions?) =>
         promptSerializationSemaphore.withPermit(
-          Effect.acquireUseRelease(
-            promptDispatchSemaphore.withPermit(
-              Effect.gen(function* () {
-                const started = yield* getStartedState;
-                yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
-                yield* Ref.set(assistantUpdatesOpenRef, true);
-                const requestPayload = {
-                  sessionId: started.sessionId,
-                  ...payload,
-                } satisfies EffectAcpSchema.PromptRequest;
-                const completed = yield* Deferred.make<void>();
-                const fiber = yield* runLoggedRequest(
-                  "session/prompt",
-                  requestPayload,
-                  acp.agent.prompt(requestPayload),
-                ).pipe(Effect.forkIn(runtimeScope));
-                const active = { fiber, completed } satisfies AcpActivePrompt;
-                yield* Ref.set(activePromptRef, Option.some(active));
-                if (promptOptions?.dispatched) {
-                  yield* Deferred.succeed(promptOptions.dispatched, undefined);
-                }
-                return active;
-              }).pipe(notificationSemaphore.withPermit),
-            ),
-            (activePrompt) =>
-              Fiber.join(activePrompt.fiber).pipe(
-                Effect.catchCauseIf(
-                  (cause) =>
-                    options.cancelBehavior !== "wait-for-prompt" && Cause.hasInterruptsOnly(cause),
-                  () =>
-                    Effect.succeed({
-                      stopReason: "cancelled",
-                    } satisfies EffectAcpSchema.PromptResponse),
-                ),
-                Effect.tap(() =>
-                  closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef }),
-                ),
-              ),
-            (activePrompt, result) =>
-              Effect.gen(function* () {
-                if (
-                  options.cancelBehavior === "wait-for-prompt" &&
-                  Exit.isFailure(result) &&
-                  Cause.hasInterrupts(result.cause)
-                ) {
-                  yield* retireRuntime(
-                    new EffectAcpErrors.AcpTransportError({
-                      method: "session/prompt",
-                      detail: "The ACP prompt stopped before the agent confirmed completion.",
-                      cause: undefined,
+          Effect.flatMap(promptOptions?.shouldStart ?? Effect.succeed(true), (shouldStart) =>
+            shouldStart
+              ? Effect.acquireUseRelease(
+                  promptDispatchSemaphore.withPermit(
+                    Effect.gen(function* () {
+                      const started = yield* getStartedState;
+                      yield* closeActiveAssistantSegment({
+                        queue: eventQueue,
+                        assistantSegmentRef,
+                      });
+                      yield* Ref.set(assistantUpdatesOpenRef, true);
+                      const requestPayload = {
+                        sessionId: started.sessionId,
+                        ...payload,
+                      } satisfies EffectAcpSchema.PromptRequest;
+                      const completed = yield* Deferred.make<void>();
+                      const fiber = yield* runLoggedRequest(
+                        "session/prompt",
+                        requestPayload,
+                        acp.agent.prompt(requestPayload),
+                      ).pipe(Effect.forkIn(runtimeScope));
+                      const active = { fiber, completed } satisfies AcpActivePrompt;
+                      yield* Ref.set(activePromptRef, Option.some(active));
+                      if (promptOptions?.dispatched) {
+                        yield* Deferred.succeed(promptOptions.dispatched, undefined);
+                      }
+                      return active;
+                    }).pipe(notificationSemaphore.withPermit),
+                  ),
+                  (activePrompt) =>
+                    Fiber.join(activePrompt.fiber).pipe(
+                      Effect.catchCauseIf(
+                        (cause) =>
+                          options.cancelBehavior !== "wait-for-prompt" &&
+                          Cause.hasInterruptsOnly(cause),
+                        () =>
+                          Effect.succeed({
+                            stopReason: "cancelled",
+                          } satisfies EffectAcpSchema.PromptResponse),
+                      ),
+                      Effect.tap(() =>
+                        closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef }),
+                      ),
+                    ),
+                  (activePrompt, result) =>
+                    Effect.gen(function* () {
+                      if (
+                        options.cancelBehavior === "wait-for-prompt" &&
+                        Exit.isFailure(result) &&
+                        Cause.hasInterrupts(result.cause)
+                      ) {
+                        yield* retireRuntime(
+                          new EffectAcpErrors.AcpTransportError({
+                            method: "session/prompt",
+                            detail: "The ACP prompt stopped before the agent confirmed completion.",
+                            cause: undefined,
+                          }),
+                        );
+                      }
+                      yield* Fiber.interrupt(activePrompt.fiber).pipe(Effect.ignore);
+                      yield* Ref.set(activePromptRef, Option.none());
+                      yield* Deferred.succeed(activePrompt.completed, undefined);
                     }),
-                  );
-                }
-                yield* Fiber.interrupt(activePrompt.fiber).pipe(Effect.ignore);
-                yield* Ref.set(activePromptRef, Option.none());
-                yield* Deferred.succeed(activePrompt.completed, undefined);
-              }),
+                )
+              : Effect.succeed({
+                  stopReason: "cancelled",
+                } satisfies EffectAcpSchema.PromptResponse),
           ),
         ),
       cancel:

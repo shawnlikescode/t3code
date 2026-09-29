@@ -15,6 +15,7 @@ import {
   applyServerSettingsPatch,
   isModelSelectionProviderEnabled,
   parsePersistedServerObservabilitySettings,
+  resolveTextGenerationModelSelection,
   resolveSourceControlWriterModelSelection,
   resolveProjectAgentBrowserAccess,
   resolveProjectAutoPull,
@@ -464,6 +465,94 @@ describe("serverSettings helpers", () => {
       settings.textGenerationModelSelection,
     );
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
+  });
+
+  it("heals unsupported Kilo background selection to an enabled custom instance", () => {
+    const safeInstanceId = ProviderInstanceId.make("claude_personal");
+    const kiloSelection = createModelSelection(ProviderInstanceId.make("kilo"), "provider/model");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providers: {
+        ...DEFAULT_SERVER_SETTINGS.providers,
+        codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+        claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, enabled: false },
+        cursor: { ...DEFAULT_SERVER_SETTINGS.providers.cursor, enabled: false },
+        grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
+        opencode: { ...DEFAULT_SERVER_SETTINGS.providers.opencode, enabled: false },
+        kilo: { ...DEFAULT_SERVER_SETTINGS.providers.kilo, enabled: true },
+      },
+      providerInstances: {
+        [safeInstanceId]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          enabled: true,
+          config: {},
+        },
+      },
+      textGenerationModelSelection: kiloSelection,
+    };
+
+    expect(resolveTextGenerationModelSelection(settings)).toEqual({
+      instanceId: safeInstanceId,
+      model: "claude-haiku-4-5",
+    });
+  });
+
+  it("prefers a known driver over an unknown fork driver in the fallback", () => {
+    const ghostInstanceId = ProviderInstanceId.make("ghost_custom");
+    const codexInstanceId = ProviderInstanceId.make("codex_personal");
+    const kiloSelection = createModelSelection(ProviderInstanceId.make("kilo"), "provider/model");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providers: {
+        ...DEFAULT_SERVER_SETTINGS.providers,
+        codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+        claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, enabled: false },
+        kilo: { ...DEFAULT_SERVER_SETTINGS.providers.kilo, enabled: true },
+      },
+      providerInstances: {
+        // Enabled and listed first, but the driver is not registered in this
+        // build, so a certain known-driver backend must win the fallback.
+        [ghostInstanceId]: {
+          driver: ProviderDriverKind.make("ghostdriver"),
+          enabled: true,
+          config: {},
+        },
+        [codexInstanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          config: {},
+        },
+      },
+      textGenerationModelSelection: kiloSelection,
+    };
+
+    expect(resolveTextGenerationModelSelection(settings).instanceId).toBe(codexInstanceId);
+  });
+
+  it("does not resurrect a disabled explicit default instance from its legacy mirror", () => {
+    const kiloSelection = createModelSelection(ProviderInstanceId.make("kilo"), "provider/model");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providers: {
+        ...DEFAULT_SERVER_SETTINGS.providers,
+        codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: true },
+        claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, enabled: false },
+        cursor: { ...DEFAULT_SERVER_SETTINGS.providers.cursor, enabled: false },
+        grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
+        opencode: { ...DEFAULT_SERVER_SETTINGS.providers.opencode, enabled: false },
+        kilo: { ...DEFAULT_SERVER_SETTINGS.providers.kilo, enabled: true },
+      },
+      providerInstances: {
+        codex: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: false,
+          config: {},
+        },
+      },
+      textGenerationModelSelection: kiloSelection,
+    };
+
+    expect(resolveTextGenerationModelSelection(settings)).toBe(kiloSelection);
   });
 
   it("replaces providerInstances maps so omitted instance fields are cleared", () => {

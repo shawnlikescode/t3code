@@ -6,6 +6,7 @@ import {
   type ModelSelection,
   ProviderDriverKind,
   ProviderInstanceId,
+  providerDriverSupportsTextGeneration,
   type ServerProvider,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -71,7 +72,7 @@ function readInstanceCustomModels(
   if (instanceId !== defaultInstanceId) {
     return [];
   }
-  const legacyProviders = settings.providers as Record<
+  const legacyProviders = settings.providers as unknown as Record<
     string,
     { readonly customModels: ReadonlyArray<unknown> } | undefined
   >;
@@ -403,7 +404,9 @@ export function resolveAppModelSelectionState(
     model: DEFAULT_TEXT_GENERATION_MODEL,
   };
   const supportedProviders = providers.filter(
-    (provider) => provider.supportsTextGeneration !== false,
+    (provider) =>
+      provider.supportsTextGeneration !== false &&
+      providerDriverSupportsTextGeneration(provider.driver),
   );
   const entries = deriveProviderInstanceEntries(supportedProviders);
   const selectedEntry = entries.find(

@@ -14,6 +14,10 @@ import type * as AcpSchema from "effect-acp/schema";
 
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
+const environmentLogPath = process.env.T3_ACP_ENV_LOG_PATH;
+const permissionScenario = process.env.T3_ACP_PERMISSION_SCENARIO ?? "same-execute";
+const ignorePromptCancelSettlement = process.env.T3_ACP_IGNORE_PROMPT_CANCEL_SETTLEMENT === "1";
+const emitPromptStartedBeforeHang = process.env.T3_ACP_EMIT_PROMPT_STARTED_BEFORE_HANG === "1";
 const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
@@ -59,6 +63,9 @@ const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const initialGrokReasoningEffort =
   process.env.T3_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
+const setConfigDelayMs = Number(process.env.T3_ACP_SET_CONFIG_DELAY_MS ?? "0");
+const setConfigDelayAfter = Number(process.env.T3_ACP_SET_CONFIG_DELAY_AFTER ?? "0");
+const setConfigMarkerPath = process.env.T3_ACP_SET_CONFIG_MARKER_PATH;
 const permissionOptionIds = {
   allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
   allowAlways: process.env.T3_ACP_ALLOW_ALWAYS_OPTION_ID ?? "allow-always",
@@ -78,8 +85,23 @@ let currentReasoning = "medium";
 let currentContext = "272k";
 let currentFast = false;
 let promptCount = 0;
+let setConfigCount = 0;
 let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
+const promptCancelSignals = new Map<string, Deferred.Deferred<void>>();
+
+if (environmentLogPath) {
+  NodeFS.writeFileSync(
+    environmentLogPath,
+    JSON.stringify({
+      KILO_PURE: process.env.KILO_PURE,
+      KILO_DISABLE_PROJECT_CONFIG: process.env.KILO_DISABLE_PROJECT_CONFIG,
+      KILO_DISABLE_EXTERNAL_SKILLS: process.env.KILO_DISABLE_EXTERNAL_SKILLS,
+      KILO_DISABLE_SKILL_SHELL: process.env.KILO_DISABLE_SKILL_SHELL,
+    }),
+    "utf8",
+  );
+}
 
 function promptIdFromRequestMeta(
   request: Pick<AcpSchema.PromptRequest, "_meta">,
@@ -302,6 +324,29 @@ const antigravityModels = [
   { modelId: "gemini-test-high", name: "Gemini Test High" },
 ] satisfies ReadonlyArray<AcpSchema.ModelInfo>;
 
+function inlineAgentModes(): ReadonlyArray<AcpSchema.SessionMode> {
+  try {
+    const config = JSON.parse(process.env.KILO_CONFIG_CONTENT ?? "{}") as unknown;
+    if (typeof config !== "object" || config === null || !("agent" in config)) return [];
+    const agents = config.agent;
+    if (typeof agents !== "object" || agents === null || Array.isArray(agents)) return [];
+    return Object.entries(agents).flatMap(([id, value]) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+      const displayName = "displayName" in value ? value.displayName : undefined;
+      const description = "description" in value ? value.description : undefined;
+      return [
+        {
+          id,
+          name: typeof displayName === "string" ? displayName : id,
+          ...(typeof description === "string" ? { description } : {}),
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
 const availableModes: ReadonlyArray<AcpSchema.SessionMode> = antigravityProfile
   ? [
       { id: "default", name: "Default" },
@@ -324,6 +369,7 @@ const availableModes: ReadonlyArray<AcpSchema.SessionMode> = antigravityProfile
         name: "Code",
         description: "Write and modify code with full tool access",
       },
+      ...inlineAgentModes(),
     ];
 
 function modeState(): AcpSchema.SessionModeState {
@@ -553,6 +599,17 @@ const program = Effect.gen(function* () {
 
   yield* agent.handleSetSessionConfigOption((request) =>
     Effect.gen(function* () {
+      setConfigCount += 1;
+      if (
+        setConfigCount > setConfigDelayAfter &&
+        Number.isFinite(setConfigDelayMs) &&
+        setConfigDelayMs > 0
+      ) {
+        if (setConfigMarkerPath) {
+          yield* Effect.sync(() => NodeFS.appendFileSync(setConfigMarkerPath, "started\n", "utf8"));
+        }
+        yield* Effect.sleep(`${setConfigDelayMs} millis`);
+      }
       if (exitOnSetConfigOption) {
         return yield* Effect.sync(() => {
           process.exit(7);
@@ -613,6 +670,10 @@ const program = Effect.gen(function* () {
             },
           });
         });
+      }
+      const promptCancelSignal = promptCancelSignals.get(cancelledSessionId);
+      if (promptCancelSignal && !ignorePromptCancelSettlement) {
+        yield* Deferred.succeed(promptCancelSignal, undefined);
       }
     }),
   );
@@ -716,7 +777,30 @@ const program = Effect.gen(function* () {
       }
 
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {
-        return yield* Effect.never;
+        if (!process.env.KILO_CONFIG_CONTENT) return yield* Effect.never;
+        if (cancelledSessions.delete(requestedSessionId)) {
+          return { stopReason: "cancelled" as const };
+        }
+        const promptCancelSignal = yield* Deferred.make<void>();
+        promptCancelSignals.set(requestedSessionId, promptCancelSignal);
+        if (emitPromptStartedBeforeHang) {
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "prompt reached mock" },
+            },
+          });
+        }
+        yield* Deferred.await(promptCancelSignal).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              promptCancelSignals.delete(requestedSessionId);
+              cancelledSessions.delete(requestedSessionId);
+            }),
+          ),
+        );
+        return { stopReason: "cancelled" as const };
       }
 
       if (emitXAiRateLimitThenHang) {
@@ -1035,19 +1119,52 @@ const program = Effect.gen(function* () {
       }
 
       if (emitToolCalls) {
-        const toolCallId = "tool-call-1";
+        const kiloSession = Boolean(process.env.KILO_CONFIG_CONTENT);
+        const toolCallId = kiloSession ? `tool-call-${promptCount}` : "tool-call-1";
+        const command =
+          permissionScenario === "different-execute" && promptCount > 1
+            ? "rm -rf build-output"
+            : "cat server/package.json";
+        const isOther = permissionScenario === "different-other";
+        const isMalformed = permissionScenario === "malformed";
+        const isEdit = permissionScenario === "edit";
+        const kind: AcpSchema.ToolKind = kiloSession
+          ? isEdit
+            ? "edit"
+            : isOther || isMalformed
+              ? "other"
+              : "execute"
+          : "execute";
+        const title = kiloSession
+          ? isEdit
+            ? "server/package.json"
+            : isOther
+              ? promptCount > 1
+                ? "custom-tool-b"
+                : "custom-tool-a"
+              : isMalformed
+                ? ""
+                : `\`${command}\``
+          : "Terminal";
+        const rawInput = kiloSession
+          ? isEdit
+            ? { filePath: "server/package.json", oldString: "old", newString: "new" }
+            : isOther
+              ? { action: title }
+              : isMalformed
+                ? undefined
+                : { command }
+          : { command: ["cat", "server/package.json"] };
 
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,
           update: {
             sessionUpdate: "tool_call",
             toolCallId,
-            title: "Terminal",
-            kind: "execute",
+            title,
+            kind,
             status: "pending",
-            rawInput: {
-              command: ["cat", "server/package.json"],
-            },
+            ...(rawInput ? { rawInput } : {}),
           },
         });
 
@@ -1076,28 +1193,36 @@ const program = Effect.gen(function* () {
 
         let cancelled = cancelledSessions.delete(requestedSessionId);
         for (let index = 0; index < permissionRequestCount; index++) {
-          const command =
-            index > 0
+          const permissionCommand =
+            index > 0 && !kiloSession
               ? (process.env.T3_ACP_SECOND_PERMISSION_COMMAND ?? "cat server/package.json")
-              : "cat server/package.json";
+              : command;
           const permission = yield* agent.client.requestPermission({
             sessionId: requestedSessionId,
             toolCall: {
               toolCallId: index === 0 ? toolCallId : `${toolCallId}-${index + 1}`,
-              title: process.env.T3_ACP_PERMISSION_TITLE ?? `\`${command}\``,
-              kind: "execute",
+              title: kiloSession
+                ? title
+                : (process.env.T3_ACP_PERMISSION_TITLE ?? `\`${permissionCommand}\``),
+              kind,
               status: "pending",
-              rawInput: {
-                variant: "Bash",
-                command,
-                description: index === 0 ? "Read package metadata" : "Read it again",
-              },
+              ...(kiloSession
+                ? rawInput
+                  ? { rawInput }
+                  : {}
+                : {
+                    rawInput: {
+                      variant: "Bash",
+                      command: permissionCommand,
+                      description: index === 0 ? "Read package metadata" : "Read it again",
+                    },
+                  }),
               content: [
                 {
                   type: "content",
                   content: {
                     type: "text",
-                    text: `Not in allowlist: ${command}`,
+                    text: `Not in allowlist: ${permissionCommand}`,
                   },
                 },
               ],

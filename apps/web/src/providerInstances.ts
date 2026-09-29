@@ -19,6 +19,7 @@ import {
   type ModelSelection,
   type ProviderDriverKind,
   ProviderInstanceId,
+  providerDriverSupportsTextGeneration,
   type ServerProvider,
   type ServerProviderModel,
   type ServerSettings,
@@ -57,6 +58,7 @@ export interface ProviderInstanceEntry {
   readonly enabled: boolean;
   readonly installed: boolean;
   readonly status: ServerProviderState;
+  readonly supportsTextGeneration: boolean;
   /**
    * True when this entry is the default instance for its driver kind —
    * i.e. its instance id equals `defaultInstanceIdForDriver(driverKind)`.
@@ -84,6 +86,19 @@ export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): b
   return entry.enabled;
 }
 
+export function hasSelectableTextGenerationProviderSelection(
+  selection: ModelSelection,
+  entries: ReadonlyArray<ProviderInstanceEntry>,
+): boolean {
+  return entries.some(
+    (entry) =>
+      entry.instanceId === selection.instanceId &&
+      entry.enabled &&
+      entry.isAvailable &&
+      entry.supportsTextGeneration,
+  );
+}
+
 /**
  * Project the wire `ServerProvider[]` into instance entries, one per
  * configured instance. Preserves the server's ordering (which sources
@@ -108,6 +123,9 @@ export function deriveProviderInstanceEntries(
       enabled: snapshot.enabled,
       installed: snapshot.installed,
       status: snapshot.status,
+      supportsTextGeneration:
+        snapshot.supportsTextGeneration !== false &&
+        providerDriverSupportsTextGeneration(driverKind),
       isDefault,
       isAvailable: snapshot.availability !== "unavailable",
       snapshot,
@@ -169,13 +187,28 @@ export function applyProviderInstanceSettings(
     const legacyProvider = Object.hasOwn(legacyProviders, entry.driverKind)
       ? legacyProviders[entry.driverKind]
       : undefined;
-    const enabled = explicitInstance
-      ? resolveProviderInstanceEnabled(explicitInstance)
-      : entry.isDefault && legacyProvider
-        ? (legacyProvider.enabled ?? entry.enabled)
-        : false;
+    const enabled =
+      entry.isAvailable &&
+      (explicitInstance
+        ? explicitInstance.driver === entry.driverKind &&
+          resolveProviderInstanceEnabled(explicitInstance)
+        : entry.isDefault && legacyProvider
+          ? (legacyProvider.enabled ?? entry.enabled)
+          : false);
     return enabled === entry.enabled ? entry : { ...entry, enabled };
   });
+}
+
+export function applyProviderInstanceSettingsToSnapshots(
+  providers: ReadonlyArray<ServerProvider>,
+  settings: Pick<ServerSettings, "providerInstances" | "providers">,
+): ReadonlyArray<ServerProvider> {
+  return applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings).map(
+    (entry) =>
+      entry.enabled === entry.snapshot.enabled
+        ? entry.snapshot
+        : { ...entry.snapshot, enabled: entry.enabled },
+  );
 }
 
 /**
@@ -294,7 +327,16 @@ export function resolveDefaultProviderModelSelection(
 ): ModelSelection | null {
   const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId);
   if (instanceId === undefined) return null;
-  if (selection?.instanceId === instanceId) return selection;
+  if (selection?.instanceId === instanceId) {
+    const entry = getProviderInstanceEntry(providers, instanceId);
+    if (
+      entry?.snapshot.hasAuthoritativeModelCatalog !== true ||
+      entry.status !== "ready" ||
+      entry.models.some((model) => model.slug === selection.model)
+    ) {
+      return selection;
+    }
+  }
   const model = getDefaultProviderInstanceModel(providers, instanceId);
   return model ? { instanceId, model } : null;
 }

@@ -4,6 +4,7 @@ import {
   CodexSettings,
   CursorSettings,
   GrokSettings,
+  KiloSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
@@ -13,6 +14,7 @@ import {
   ClaudeAI,
   CursorIcon,
   GrokIcon,
+  KiloIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
@@ -75,6 +77,13 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("kilo"),
+    label: "Kilo Code",
+    icon: KiloIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: KiloSettings,
   },
   {
     value: ProviderDriverKind.make("antigravity"),

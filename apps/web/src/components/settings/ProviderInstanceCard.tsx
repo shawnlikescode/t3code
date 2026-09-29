@@ -500,8 +500,11 @@ export function ProviderInstanceCard({
   const driverKind: ProviderDriverKind | null = isProviderDriverKind(instance.driver)
     ? instance.driver
     : null;
-  const customModels =
-    instance.driver === "antigravity" ? [] : readConfigCustomModels(instance.config);
+  const supportsCustomModels =
+    instance.driver !== "antigravity" &&
+    instance.driver !== "kilo" &&
+    liveProvider?.hasAuthoritativeModelCatalog !== true;
+  const customModels = supportsCustomModels ? readConfigCustomModels(instance.config) : [];
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
@@ -956,12 +959,13 @@ export function ProviderInstanceCard({
         >
           <div className="px-3 py-3 sm:px-4">
             <p className="mb-3 text-xs text-muted-foreground">
-              Favorites, visibility, and ordering are saved on this device. Custom models are saved
-              on the selected environment.
+              Favorites, visibility, and ordering are saved on this device.
+              {supportsCustomModels ? " Custom models are saved on the selected environment." : ""}
             </p>
             <ProviderModelsSection
               instanceId={instanceId}
               driverKind={driverKind}
+              supportsCustomModels={supportsCustomModels}
               models={modelsForDisplay}
               customModels={customModels}
               hiddenModels={hiddenModels}

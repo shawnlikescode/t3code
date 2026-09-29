@@ -437,8 +437,8 @@ it.layer(testLayer)("AntigravityDriver", (it) => {
         const h = yield* makeHarness();
         yield* h.refresh();
         h.controls.selected = h.signedOut;
-        const error = yield* h.instance.textGeneration
-          .generateThreadTitle({
+        const error = yield* h.instance
+          .textGeneration!.generateThreadTitle({
             cwd: h.profileDirectory,
             message: "Repair Google login",
             modelSelection: { instanceId: h.instance.instanceId, model: "gemini-test-low" },

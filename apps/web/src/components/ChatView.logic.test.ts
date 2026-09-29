@@ -45,6 +45,7 @@ import {
   dismissBranchMismatchForSession,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getAntigravitySendBlockReason,
+  getProviderSendBlockReason,
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
@@ -1347,6 +1348,25 @@ describe("resolveComposerProviderSelection", () => {
     }).snapshot;
 
     expect(getAntigravitySendBlockReason(provider, "gpt-model")).toBeNull();
+  });
+
+  it("holds Kilo sends until its catalog is ready and rejects stale models", () => {
+    const provider = entry("kilo", "kilo", {
+      status: "warning",
+      hasAuthoritativeModelCatalog: true,
+      models: [],
+    }).snapshot;
+    expect(getProviderSendBlockReason(provider, "kilo/stale")).toContain("Checking");
+    expect(
+      getProviderSendBlockReason(
+        {
+          ...provider,
+          status: "ready",
+          models: [{ slug: "kilo/live", name: "Live", isCustom: false, capabilities: {} }],
+        },
+        "kilo/stale",
+      ),
+    ).toContain("no longer available");
   });
 
   it("does not continue an existing Antigravity thread in another profile after deletion", () => {

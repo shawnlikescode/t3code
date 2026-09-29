@@ -1,12 +1,17 @@
 import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  DEFAULT_TEXT_GENERATION_MODEL,
+  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   isProviderDriverKind,
   isProviderAvailable,
+  providerDriverSupportsTextGeneration,
   resolveProviderInstanceEnabled,
   type ModelSelection,
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
-  type ProviderDriverKind,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
@@ -72,31 +77,91 @@ export function isModelSelectionProviderEnabled(
 ): boolean {
   const instanceConfig = settings.providerInstances[selection.instanceId];
   if (instanceConfig !== undefined) {
-    return resolveProviderInstanceEnabled(instanceConfig);
+    return (
+      providerDriverSupportsTextGeneration(instanceConfig.driver) &&
+      resolveProviderInstanceEnabled(instanceConfig)
+    );
   }
 
   return (
     isProviderDriverKind(selection.instanceId) &&
+    providerDriverSupportsTextGeneration(selection.instanceId) &&
     getLegacyProviderSettings(settings, selection.instanceId)?.enabled === true
   );
+}
+
+function defaultTextGenerationSelection(
+  instanceId: ModelSelection["instanceId"],
+  driver: ProviderDriverKind,
+): ModelSelection {
+  return createModelSelection(
+    instanceId,
+    DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[driver] ??
+      DEFAULT_MODEL_BY_PROVIDER[driver] ??
+      DEFAULT_TEXT_GENERATION_MODEL,
+  );
+}
+
+export function findEnabledTextGenerationFallback(
+  settings: ServerSettings,
+): ModelSelection | undefined {
+  const isBuiltInDriver = (driver: ProviderDriverKind) =>
+    getLegacyProviderSettings(settings, driver) !== undefined;
+  const instances = Object.entries(settings.providerInstances);
+  const ordered = [
+    ...instances.filter(([, instance]) => isBuiltInDriver(instance.driver)),
+    ...instances.filter(([, instance]) => !isBuiltInDriver(instance.driver)),
+  ];
+  for (const [rawInstanceId, instance] of ordered) {
+    if (
+      resolveProviderInstanceEnabled(instance) &&
+      providerDriverSupportsTextGeneration(instance.driver)
+    ) {
+      return defaultTextGenerationSelection(
+        ProviderInstanceId.make(rawInstanceId),
+        instance.driver,
+      );
+    }
+  }
+  for (const [rawDriver, provider] of Object.entries(settings.providers)) {
+    const driver = ProviderDriverKind.make(rawDriver);
+    if (
+      settings.providerInstances[ProviderInstanceId.make(rawDriver)] !== undefined ||
+      !provider.enabled ||
+      !providerDriverSupportsTextGeneration(driver)
+    )
+      continue;
+    return defaultTextGenerationSelection(ProviderInstanceId.make(rawDriver), driver);
+  }
+  return undefined;
+}
+
+export function resolveTextGenerationModelSelection(settings: ServerSettings): ModelSelection {
+  const selection = settings.textGenerationModelSelection;
+  return isModelSelectionProviderEnabled(settings, selection)
+    ? selection
+    : (findEnabledTextGenerationFallback(settings) ?? selection);
 }
 
 export function resolveSourceControlWriterModelSelection(
   settings: ServerSettings,
   providers?: ReadonlyArray<ServerProvider>,
 ): ModelSelection {
+  const fallback = resolveTextGenerationModelSelection(settings);
   const selection = settings.sourceControlWriterModelSelection;
   if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
-    return settings.textGenerationModelSelection;
+    return fallback;
   }
   if (providers === undefined) {
     return selection;
   }
 
   const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
-  return provider?.enabled === true && isProviderAvailable(provider)
+  return provider?.enabled === true &&
+    provider.supportsTextGeneration !== false &&
+    isProviderAvailable(provider)
     ? selection
-    : settings.textGenerationModelSelection;
+    : fallback;
 }
 
 export interface PersistedServerObservabilitySettings {
