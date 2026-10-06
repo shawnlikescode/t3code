@@ -174,7 +174,22 @@ export function collectSessionConfigOptionValues(
 export function parseSessionModeState(
   sessionResponse: AcpSessionSetupResponse,
 ): AcpSessionModeState | undefined {
-  const modes = sessionResponse.modes;
+  // Current ACP agents expose modes as config options instead of the legacy field.
+  const modeOption = findSessionConfigOption(sessionResponse.configOptions, "mode");
+  const modes =
+    sessionResponse.modes ??
+    (modeOption?.type === "select"
+      ? {
+          currentModeId: modeOption.currentValue,
+          availableModes: modeOption.options.flatMap((entry) =>
+            ("value" in entry ? [entry] : entry.options).map((option) => ({
+              id: option.value,
+              name: option.name,
+              ...(option.description ? { description: option.description } : {}),
+            })),
+          ),
+        }
+      : undefined);
   if (!modes) return undefined;
   const currentModeId = modes.currentModeId.trim();
   if (!currentModeId) {

@@ -190,6 +190,21 @@ export function buildKiloChildAgentPolicyEnvironment(input: {
               task: "deny",
             },
   };
+  const delegatedAgents: Record<string, unknown> = {};
+  if (input.policy === "full-access") {
+    // Kilo's ACP bridge only forwards approvals for registered primary
+    // sessions. Subagents otherwise retain their built-in "ask" policy and
+    // wait forever on approvals that T3 never receives.
+    const names = new Set(["general", "explore", ...Object.keys(existingAgents)]);
+    for (const name of names) {
+      const existing = existingAgents[name];
+      if (Predicate.isObject(existing) && existing.mode === "primary") continue;
+      delegatedAgents[name] = {
+        ...(Predicate.isObject(existing) ? existing : {}),
+        permission: { "*": "allow", question: "deny" },
+      };
+    }
+  }
   return {
     ok: true,
     modeId,
@@ -197,7 +212,7 @@ export function buildKiloChildAgentPolicyEnvironment(input: {
       ...input.environment,
       KILO_CONFIG_CONTENT: JSON.stringify({
         ...config,
-        agent: { ...existingAgents, [modeId]: agent },
+        agent: { ...existingAgents, ...delegatedAgents, [modeId]: agent },
       }),
     },
   };

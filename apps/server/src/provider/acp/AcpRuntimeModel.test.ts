@@ -16,6 +16,47 @@ import {
 } from "./AcpRuntimeModel.ts";
 
 describe("AcpRuntimeModel", () => {
+  it("reads Kilo permission agents from mode config options without legacy modes", () => {
+    expect(
+      parseSessionModeState({
+        sessionId: "kilo-session",
+        configOptions: [
+          {
+            id: "mode",
+            name: "Session Mode",
+            category: "mode",
+            type: "select",
+            currentValue: "code",
+            options: [
+              {
+                group: "t3",
+                name: "T3",
+                options: [
+                  { value: "code", name: "Code" },
+                  {
+                    value: "t3-full-access-nonce",
+                    name: "T3 full access",
+                    description: "Child-scoped permission agent",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      } satisfies EffectAcpSchema.NewSessionResponse),
+    ).toEqual({
+      currentModeId: "code",
+      availableModes: [
+        { id: "code", name: "Code" },
+        {
+          id: "t3-full-access-nonce",
+          name: "T3 full access",
+          description: "Child-scoped permission agent",
+        },
+      ],
+    });
+  });
+
   it("parses session mode state from typed ACP session setup responses", () => {
     const modeState = parseSessionModeState({
       sessionId: "session-1",

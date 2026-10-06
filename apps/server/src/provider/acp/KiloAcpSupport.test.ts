@@ -165,6 +165,29 @@ describe("kilo ACP support", () => {
     });
   });
 
+  it("gives delegated agents the full-access policy so ACP cannot strand their approvals", () => {
+    const result = buildKiloChildAgentPolicyEnvironment({
+      environment: { KILO_CONFIG_CONTENT: JSON.stringify({ agent: {
+        researcher: { mode: "subagent", description: "Custom research", permission: { bash: "ask" } },
+        unrelated: { mode: "primary", permission: { bash: "deny" } },
+      } }) },
+      nonce: "nonce",
+      policy: "full-access",
+      label: "T3 full access",
+      prompt: "Implement the user's request.",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const config = JSON.parse(result.environment.KILO_CONFIG_CONTENT ?? "") as {
+      readonly agent: Record<string, { readonly permission: unknown; readonly description?: string }>;
+    };
+    for (const name of ["general", "explore", "researcher"]) {
+      expect(config.agent[name]?.permission).toEqual({ "*": "allow", question: "deny" });
+    }
+    expect(config.agent.researcher?.description).toBe("Custom research");
+    expect(config.agent.unrelated?.permission).toEqual({ bash: "deny" });
+  });
+
   it("creates a read-only plan agent that cannot question or delegate", () => {
     const result = buildKiloChildAgentPolicyEnvironment({
       environment: {},

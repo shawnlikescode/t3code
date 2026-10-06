@@ -5,6 +5,7 @@ import {
   providerDriverSupportsTextGeneration,
   type ServerProvider,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
@@ -13,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
@@ -39,7 +41,7 @@ const KILO_PRESENTATION = {
   badgeLabel: "Early Access",
   showInteractionModeToggle: false,
   supportsConversationRollback: false,
-  requiresNewThreadForModelChange: true,
+  requiresNewThreadForModelChange: false,
   // Derived from the contracts-level driver capability so settings-time
   // resolution (which has no snapshot) and snapshot consumers agree.
   supportsTextGeneration: providerDriverSupportsTextGeneration(ProviderDriverKind.make("kilo")),
@@ -165,6 +167,48 @@ export const runKiloModelsCommand = Effect.fn("runKiloModelsCommand")(function* 
     }),
     { maxOutputBytes: KILO_MODELS_MAX_OUTPUT_BYTES },
   );
+});
+
+const decodeKiloSkills = Schema.decodeUnknownSync(
+  Schema.Array(Schema.Struct({
+    name: Schema.NonEmptyString,
+    description: Schema.String,
+    location: Schema.NonEmptyString,
+  })),
+);
+
+export function parseKiloSkillsOutput(stdout: string): ReadonlyArray<ServerProviderSkill> {
+  return decodeKiloSkills(JSON.parse(stdout)).map((skill) => ({
+    name: skill.name,
+    ...(skill.description.trim() ? { description: skill.description.trim() } : {}),
+    path: skill.location,
+    enabled: true,
+  }));
+}
+
+const discoverKiloSkills = Effect.fn("discoverKiloSkills")(function* (
+  kiloSettings: KiloSettings,
+  environment: NodeJS.ProcessEnv,
+) {
+  const command = kiloSettings.binaryPath || "kilo";
+  const skillEnvironment = { ...hardenKiloProbeEnvironment(environment) };
+  // Metadata discovery must include the same external skill directories as
+  // sessions. Plugins and skill shell execution stay disabled for this probe.
+  delete skillEnvironment.KILO_DISABLE_EXTERNAL_SKILLS;
+  const spawnCommand = yield* resolveSpawnCommand(command, ["debug", "skill"], {
+    env: skillEnvironment,
+  });
+  const result = yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: skillEnvironment,
+      forceKillAfter: Duration.seconds(2),
+      shell: spawnCommand.shell,
+    }),
+    { maxOutputBytes: 16 * 1024 * 1024 },
+  );
+  if (result.code !== 0) return [];
+  return yield* Effect.try(() => parseKiloSkillsOutput(result.stdout));
 });
 
 export const runKiloVersionCommand = Effect.fn("runKiloVersionCommand")(function* (
@@ -340,11 +384,18 @@ export const checkKiloProviderStatus = Effect.fn("checkKiloProviderStatus")(func
     })),
   ];
 
+  const skills = yield* discoverKiloSkills(kiloSettings, environment).pipe(
+    Effect.timeoutOption(KILO_MODEL_DISCOVERY_TIMEOUT_MS),
+    Effect.map(Option.getOrElse((): ReadonlyArray<ServerProviderSkill> => [])),
+    Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<ServerProviderSkill>)),
+  );
+
   return buildServerProvider({
     presentation: KILO_PRESENTATION,
     enabled: kiloSettings.enabled,
     checkedAt,
     models,
+    skills,
     probe: {
       installed: true,
       version,

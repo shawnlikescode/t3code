@@ -23,6 +23,7 @@ import {
   buildInitialKiloProviderSnapshot,
   checkKiloProviderStatus,
   parseKiloModelsOutput,
+  parseKiloSkillsOutput,
 } from "./KiloProvider.ts";
 
 const decodeKiloSettings = Schema.decodeSync(KiloSettings);
@@ -58,6 +59,14 @@ if [ "$1" = "models" ]; then
   printf "kilo/openrouter/free\nopenai/gpt-5\nopenai/gpt-5\n"
   exit 0
 fi
+if [ "$1" = "debug" ] && [ "$2" = "skill" ]; then
+  if [ -n "$T3_KILO_SKILLS_ENV_LOG" ]; then
+    printf "%s|%s|%s|%s\n" "$KILO_PURE" "$KILO_DISABLE_PROJECT_CONFIG" "$KILO_DISABLE_EXTERNAL_SKILLS" "$KILO_DISABLE_SKILL_SHELL" >> "$T3_KILO_SKILLS_ENV_LOG"
+  fi
+  if [ "$T3_KILO_SKILLS_MODE" = "nonzero" ]; then exit 17; fi
+  echo '[{"name":"example-skill","description":"Example instructions","location":"/home/user/.agents/skills/example/SKILL.md","content":"unused"}]'
+  exit 0
+fi
 if [ -n "$T3_KILO_UNEXPECTED_COMMAND_LOG" ]; then
   printf "%s\n" "$*" >> "$T3_KILO_UNEXPECTED_COMMAND_LOG"
 fi
@@ -69,12 +78,32 @@ exit 91
 }
 
 describe("KiloProvider", () => {
+  it("rejects malformed skill metadata", () => {
+    expect(() => parseKiloSkillsOutput('{"name":"bad"}')).toThrow();
+    expect(() => parseKiloSkillsOutput('[{"name":"bad","location":42}]')).toThrow();
+  });
+
+  it.effect("keeps the provider usable when skill discovery fails", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockKiloWrapper({ T3_KILO_SKILLS_MODE: "nonzero" }),
+      );
+      const snapshot = yield* checkKiloProviderStatus(
+        decodeKiloSettings({ enabled: true, binaryPath }),
+      ).pipe(Effect.provide(NodeServices.layer));
+      expect(snapshot.status).toBe("ready");
+      expect(snapshot.skills).toEqual([]);
+      expect(snapshot.models.length).toBeGreaterThan(0);
+    }),
+  );
+
   it.effect("builds a disabled initial snapshot", () =>
     Effect.gen(function* () {
       const snapshot = yield* buildInitialKiloProviderSnapshot(decodeKiloSettings({}));
       expect(snapshot.displayName).toBe("Kilo Code");
       expect(snapshot.badgeLabel).toBe("Early Access");
       expect(snapshot.supportsTextGeneration).toBe(false);
+      expect(snapshot.requiresNewThreadForModelChange).toBe(false);
       expect(snapshot.enabled).toBe(false);
       expect(snapshot.status).toBe("disabled");
     }),
@@ -148,9 +177,11 @@ describe("KiloProvider", () => {
       );
       const environmentLogPath = NodePath.join(tempDir, "models-env.txt");
       const unexpectedCommandLogPath = NodePath.join(tempDir, "unexpected-command.txt");
+      const skillsEnvironmentLogPath = NodePath.join(tempDir, "skills-env.txt");
       const binaryPath = yield* Effect.promise(() =>
         makeMockKiloWrapper({
           T3_KILO_MODELS_ENV_LOG: environmentLogPath,
+          T3_KILO_SKILLS_ENV_LOG: skillsEnvironmentLogPath,
           T3_KILO_UNEXPECTED_COMMAND_LOG: unexpectedCommandLogPath,
         }),
       );
@@ -159,6 +190,7 @@ describe("KiloProvider", () => {
       ).pipe(Effect.provide(NodeServices.layer));
       expect(snapshot.version).toBe("7.4.23");
       expect(snapshot.status).toBe("ready");
+      expect(snapshot.skills).toEqual([{name: "example-skill", description: "Example instructions", path: "/home/user/.agents/skills/example/SKILL.md", enabled: true}]);
 
       const slugs = snapshot.models.map((model) => model.slug);
       expect(slugs).toContain("kilo/openrouter/free");
@@ -170,6 +202,9 @@ describe("KiloProvider", () => {
       expect(
         (yield* Effect.promise(() => NodeFSP.readFile(environmentLogPath, "utf8"))).trim(),
       ).toBe("1|1|1|1|models");
+      expect(
+        (yield* Effect.promise(() => NodeFSP.readFile(skillsEnvironmentLogPath, "utf8"))).trim(),
+      ).toBe("1|1||1");
       expect(
         yield* Effect.promise(() =>
           NodeFSP.stat(unexpectedCommandLogPath).then(
