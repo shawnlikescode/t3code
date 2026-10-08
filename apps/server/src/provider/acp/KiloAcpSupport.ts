@@ -159,6 +159,13 @@ export function buildKiloChildAgentPolicyEnvironment(input: {
 
   const existingAgents = Predicate.isObject(config.agent) ? config.agent : {};
   const modeId = `t3-${input.policy}-${input.nonce}`;
+  // Kilo hardens broad allows into asks for env-file reads. ACP does not
+  // forward child approvals, so Full access needs explicit patterns too.
+  const fullAccessPermission = {
+    "*": "allow",
+    read: { "*": "allow", "*.env": "allow", "*.env.*": "allow" },
+    question: "deny",
+  };
   const agent = {
     description: input.label,
     displayName: input.label,
@@ -178,7 +185,7 @@ export function buildKiloChildAgentPolicyEnvironment(input: {
             task: "deny",
           }
         : input.policy === "full-access"
-          ? { "*": "allow", question: "deny" }
+          ? fullAccessPermission
           : {
               "*": "deny",
               ...KILO_SAFE_READ_PERMISSION_POLICY,
@@ -201,7 +208,7 @@ export function buildKiloChildAgentPolicyEnvironment(input: {
       if (Predicate.isObject(existing) && existing.mode === "primary") continue;
       delegatedAgents[name] = {
         ...(Predicate.isObject(existing) ? existing : {}),
-        permission: { "*": "allow", question: "deny" },
+        permission: fullAccessPermission,
       };
     }
   }
