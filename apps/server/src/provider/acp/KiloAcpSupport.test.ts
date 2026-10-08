@@ -161,16 +161,25 @@ describe("kilo ACP support", () => {
     };
     expect(config.agent[result.modeId]?.permission).toEqual({
       "*": "allow",
+      read: { "*": "allow", "*.env": "allow", "*.env.*": "allow" },
       question: "deny",
     });
   });
 
   it("gives delegated agents the full-access policy so ACP cannot strand their approvals", () => {
     const result = buildKiloChildAgentPolicyEnvironment({
-      environment: { KILO_CONFIG_CONTENT: JSON.stringify({ agent: {
-        researcher: { mode: "subagent", description: "Custom research", permission: { bash: "ask" } },
-        unrelated: { mode: "primary", permission: { bash: "deny" } },
-      } }) },
+      environment: {
+        KILO_CONFIG_CONTENT: JSON.stringify({
+          agent: {
+            researcher: {
+              mode: "subagent",
+              description: "Custom research",
+              permission: { bash: "ask" },
+            },
+            unrelated: { mode: "primary", permission: { bash: "deny" } },
+          },
+        }),
+      },
       nonce: "nonce",
       policy: "full-access",
       label: "T3 full access",
@@ -179,10 +188,17 @@ describe("kilo ACP support", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const config = JSON.parse(result.environment.KILO_CONFIG_CONTENT ?? "") as {
-      readonly agent: Record<string, { readonly permission: unknown; readonly description?: string }>;
+      readonly agent: Record<
+        string,
+        { readonly permission: unknown; readonly description?: string }
+      >;
     };
     for (const name of ["general", "explore", "researcher"]) {
-      expect(config.agent[name]?.permission).toEqual({ "*": "allow", question: "deny" });
+      expect(config.agent[name]?.permission).toEqual({
+        "*": "allow",
+        read: { "*": "allow", "*.env": "allow", "*.env.*": "allow" },
+        question: "deny",
+      });
     }
     expect(config.agent.researcher?.description).toBe("Custom research");
     expect(config.agent.unrelated?.permission).toEqual({ bash: "deny" });

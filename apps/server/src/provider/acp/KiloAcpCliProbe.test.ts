@@ -10,6 +10,8 @@
  * advertised free OpenRouter model from an isolated XDG home.
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeHttp from "node:http";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { it } from "@effect/vitest";
@@ -21,6 +23,7 @@ import { describe, expect } from "vite-plus/test";
 
 import {
   applyKiloAcpModelSelection,
+  buildKiloChildAgentPolicyEnvironment,
   currentKiloModelIdFromSessionSetup,
   hardenKiloProbeEnvironment,
   kiloModelsFromSessionConfigOptions,
@@ -64,6 +67,127 @@ const startProbeRuntime = <E = never, R = never>(
 describe.runIf(process.env.T3_KILO_ACP_PROBE === "1" && hasExplicitIsolatedXdg)(
   "Kilo ACP CLI probe",
   () => {
+    it.effect(
+      "full-access child reads an env schema without an invisible approval",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* Effect.promise(() =>
+            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-kilo-child-read-")),
+          );
+          yield* Effect.promise(() =>
+            NodeFSP.writeFile(NodePath.join(cwd, ".env.schema"), "FIXTURE_ONLY=child-read-ok\n"),
+          );
+          let requests = 0;
+          let childRead = false;
+          const server = NodeHttp.createServer(async (request, response) => {
+            const chunks: Buffer[] = [];
+            for await (const chunk of request) chunks.push(Buffer.from(chunk));
+            const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+              messages: Array<{ role: string; content?: string }>;
+              tools?: Array<{ function: { name: string } }>;
+            };
+            requests += 1;
+            const child = !(body.tools ?? []).some((tool) => tool.function.name === "task");
+            const result = body.messages.find((message) => message.role === "tool");
+            if (child && result?.content?.includes("child-read-ok")) childRead = true;
+            const tool = child ? "read" : "task";
+            const args = child
+              ? { filePath: NodePath.join(cwd, ".env.schema") }
+              : {
+                  description: "Read fixture",
+                  prompt: "Read .env.schema",
+                  subagent_type: "general",
+                };
+            const delta = result
+              ? { content: child ? "CHILD_DONE" : "PARENT_DONE" }
+              : {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: `call_${requests}`,
+                      type: "function",
+                      function: { name: tool, arguments: JSON.stringify(args) },
+                    },
+                  ],
+                };
+            response.writeHead(200, { "Content-Type": "text/event-stream" });
+            for (const choice of [
+              { delta: { role: "assistant" }, finish_reason: null },
+              { delta, finish_reason: null },
+              { delta: {}, finish_reason: result ? "stop" : "tool_calls" },
+            ])
+              response.write(
+                `data: ${JSON.stringify({
+                  id: "fixture",
+                  object: "chat.completion.chunk",
+                  created: 1,
+                  model: "fixture",
+                  choices: [{ index: 0, ...choice }],
+                })}\n\n`,
+              );
+            response.end("data: [DONE]\n\n");
+          });
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)),
+          );
+          try {
+            const address = server.address();
+            if (!address || typeof address === "string") throw new Error("No fixture port");
+            const policy = buildKiloChildAgentPolicyEnvironment({
+              environment: {
+                ...hardenKiloProbeEnvironment(process.env),
+                KILO_CONFIG_CONTENT: JSON.stringify({
+                  model: "fixture/model",
+                  provider: {
+                    fixture: {
+                      npm: "@ai-sdk/openai-compatible",
+                      options: {
+                        baseURL: `http://127.0.0.1:${address.port}/v1`,
+                        apiKey: "fixture",
+                      },
+                      models: {
+                        model: { name: "fixture", limit: { context: 100000, output: 1000 } },
+                      },
+                    },
+                  },
+                }),
+              },
+              nonce: "child-read-fixture",
+              policy: "full-access",
+              label: "Fixture",
+              prompt: "Run fixture",
+            });
+            if (!policy.ok) throw new Error(policy.message);
+            yield* Effect.gen(function* () {
+              const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+              const { runtime } = yield* startKiloAcpRuntime({
+                kiloSettings: { binaryPath: "kilo" },
+                environment: policy.environment,
+                childProcessSpawner,
+                cwd,
+                clientInfo: { name: "t3-child-read-fixture", version: "1" },
+              });
+              yield* runtime.setMode(policy.modeId);
+              const result = yield* runtime
+                .prompt({ prompt: [{ type: "text", text: "Run the task fixture." }] })
+                .pipe(Effect.timeoutOption("10 seconds"));
+              expect(Option.isSome(result)).toBe(true);
+              expect(childRead).toBe(true);
+              expect(requests).toBeGreaterThanOrEqual(4);
+            }).pipe(Effect.scoped);
+          } finally {
+            yield* Effect.promise(
+              () =>
+                new Promise<void>((resolve, reject) =>
+                  server.close((error) => (error ? reject(error) : resolve())),
+                ),
+            );
+            yield* Effect.promise(() => NodeFSP.rm(cwd, { recursive: true, force: true }));
+          }
+        }).pipe(Effect.provide(NodeServices.layer)),
+      30_000,
+    );
+
     it.effect("initialize, authenticate, and create a session against real kilo acp", () =>
       Effect.gen(function* () {
         const { started } = yield* startProbeRuntime();
