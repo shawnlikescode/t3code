@@ -18,6 +18,7 @@ import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect } from "vite-plus/test";
 
@@ -29,6 +30,8 @@ import {
   kiloModelsFromSessionConfigOptions,
   startKiloAcpRuntime,
 } from "./KiloAcpSupport.ts";
+
+const encodeFixtureConfig = Schema.encodeSync(Schema.UnknownFromJsonString);
 
 const hasExplicitIsolatedXdg = [
   "XDG_CONFIG_HOME",
@@ -136,7 +139,7 @@ describe.runIf(process.env.T3_KILO_ACP_PROBE === "1" && hasExplicitIsolatedXdg)(
             const policy = buildKiloChildAgentPolicyEnvironment({
               environment: {
                 ...hardenKiloProbeEnvironment(process.env),
-                KILO_CONFIG_CONTENT: JSON.stringify({
+                KILO_CONFIG_CONTENT: encodeFixtureConfig({
                   model: "fixture/model",
                   provider: {
                     fixture: {
