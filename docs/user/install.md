@@ -118,12 +118,13 @@ computer.
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
-| Kilo Code | Install [Kilo CLI](https://kilo.ai/docs/code-with-ai/platforms/cli), then run `kilo auth login --provider kilo`. |
+| Kilo Code   | Install [Kilo CLI](https://kilo.ai/docs/code-with-ai/platforms/cli), then run `kilo auth login --provider kilo`.                                          |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
 
-Kilo Code requires CLI 7.4.23 or newer. T3 Code uses its ACP session for chat and
-approvals. Kilo threads do not support conversation rollback; choose another
-provider for automatic thread titles and source control writing.
+Kilo Code requires CLI 7.4.23 or newer. Kilo supports live work updates, child-agent
+progress, approvals, questions, model switching, and conversation rollback. Existing
+Kilo conversations continue after an update. Choose another provider for automatic
+thread titles and source control writing.
 
 Provider CLIs must be on the server's `PATH`. If T3 Code cannot find one, set its
 **Binary path** in provider settings, especially when using a version manager.

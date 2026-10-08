@@ -40,7 +40,7 @@ const KILO_PRESENTATION = {
   displayName: "Kilo Code",
   badgeLabel: "Early Access",
   showInteractionModeToggle: false,
-  supportsConversationRollback: false,
+  supportsConversationRollback: true,
   requiresNewThreadForModelChange: false,
   // Derived from the contracts-level driver capability so settings-time
   // resolution (which has no snapshot) and snapshot consumers agree.
@@ -170,11 +170,13 @@ export const runKiloModelsCommand = Effect.fn("runKiloModelsCommand")(function* 
 });
 
 const decodeKiloSkills = Schema.decodeUnknownSync(
-  Schema.Array(Schema.Struct({
-    name: Schema.NonEmptyString,
-    description: Schema.String,
-    location: Schema.NonEmptyString,
-  })),
+  Schema.Array(
+    Schema.Struct({
+      name: Schema.NonEmptyString,
+      description: Schema.String,
+      location: Schema.NonEmptyString,
+    }),
+  ),
 );
 
 export function parseKiloSkillsOutput(stdout: string): ReadonlyArray<ServerProviderSkill> {

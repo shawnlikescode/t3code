@@ -141,14 +141,17 @@ export const runOpenCodeSdk = <A>(
 
 export const verifyOpenCodeServerVersion = Effect.fn("verifyOpenCodeServerVersion")(function* (
   client: OpencodeClient,
+  requirement?: { readonly name: string; readonly minimumVersion: string },
 ) {
+  const name = requirement?.name ?? "OpenCode";
+  const minimumVersion = requirement?.minimumVersion ?? MINIMUM_OPENCODE_VERSION;
   const healthOption = yield* runOpenCodeSdk("global.health", (signal) =>
     client.global.health({ signal }),
   ).pipe(Effect.timeoutOption(OPENCODE_HEALTH_TIMEOUT));
   if (Option.isNone(healthOption)) {
     return yield* new OpenCodeRuntimeError({
       operation: "global.health",
-      detail: "Timed out while checking the OpenCode server version.",
+      detail: `Timed out while checking the ${name} server version.`,
     });
   }
 
@@ -157,7 +160,7 @@ export const verifyOpenCodeServerVersion = Effect.fn("verifyOpenCodeServerVersio
       (cause) =>
         new OpenCodeRuntimeError({
           operation: "global.health",
-          detail: `OpenCode server returned an invalid health response. T3 Code requires OpenCode v${MINIMUM_OPENCODE_VERSION} or newer.`,
+          detail: `${name} server returned an invalid health response. T3 Code requires ${name} v${minimumVersion} or newer.`,
           cause,
         }),
     ),
@@ -165,13 +168,13 @@ export const verifyOpenCodeServerVersion = Effect.fn("verifyOpenCodeServerVersio
   if (parseSemver(health.version) === null) {
     return yield* new OpenCodeRuntimeError({
       operation: "global.health",
-      detail: `OpenCode server returned an invalid version. T3 Code requires OpenCode v${MINIMUM_OPENCODE_VERSION} or newer.`,
+      detail: `${name} server returned an invalid version. T3 Code requires ${name} v${minimumVersion} or newer.`,
     });
   }
-  if (compareSemverVersions(health.version, MINIMUM_OPENCODE_VERSION) < 0) {
+  if (compareSemverVersions(health.version, minimumVersion) < 0) {
     return yield* new OpenCodeRuntimeError({
       operation: "global.health",
-      detail: `OpenCode v${health.version} is too old. Upgrade to v${MINIMUM_OPENCODE_VERSION} or newer.`,
+      detail: `${name} v${health.version} is too old. Upgrade to v${minimumVersion} or newer.`,
     });
   }
   return health.version;
@@ -584,7 +587,10 @@ function ensureRuntimeError(
     : new OpenCodeRuntimeError({ operation, detail, cause });
 }
 
-const makeOpenCodeRuntime = Effect.gen(function* () {
+export const makeOpenCodeRuntime = Effect.fn("makeOpenCodeRuntime")(function* (options?: {
+  readonly createClient?: OpenCodeRuntimeShape["createOpenCodeSdkClient"];
+  readonly serverRequirement?: { readonly name: string; readonly minimumVersion: string };
+}) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcessPlatform;
@@ -647,6 +653,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     );
 
   const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) =>
+    options?.createClient?.(input) ??
     createOpencodeClient({
       baseUrl: input.baseUrl,
       directory: input.directory,
@@ -843,6 +850,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           directory: input.directory,
           ...(serverPassword !== undefined ? { serverPassword } : {}),
         }),
+        options?.serverRequirement,
       );
 
       return {
@@ -870,6 +878,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           directory: input.directory,
           ...(serverPassword !== undefined ? { serverPassword } : {}),
         }),
+        options?.serverRequirement,
       ).pipe(
         Effect.map((version) => ({
           url: serverUrl,
@@ -1091,6 +1100,6 @@ export class OpenCodeRuntime extends Context.Service<OpenCodeRuntime, OpenCodeRu
   "t3/provider/opencodeRuntime",
 ) {}
 
-export const OpenCodeRuntimeLive = Layer.effect(OpenCodeRuntime, makeOpenCodeRuntime).pipe(
+export const OpenCodeRuntimeLive = Layer.effect(OpenCodeRuntime, makeOpenCodeRuntime()).pipe(
   Layer.provide(NetService.layer),
 );

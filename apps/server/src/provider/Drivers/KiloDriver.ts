@@ -11,7 +11,7 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeKiloAdapter } from "../Layers/KiloAdapter.ts";
+import { makeKiloSdkAdapter } from "../Layers/KiloSdkAdapter.ts";
 import {
   buildInitialKiloProviderSnapshot,
   checkKiloProviderStatus,
@@ -119,11 +119,21 @@ export const KiloDriver: ProviderDriver<KiloSettings, KiloDriverEnv> = {
         ),
       );
 
-      const adapter = yield* makeKiloAdapter(effectiveConfig, {
+      const adapter = yield* makeKiloSdkAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
-      });
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Failed to initialize Kilo native adapter.",
+              cause,
+            }),
+        ),
+      );
       const checkProvider = checkKiloProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),

@@ -48,6 +48,7 @@ import {
   isSameOpenCodeDirectory,
   makeOpenCodeAdapter,
   mergeOpenCodeAssistantText,
+  type OpenCodeAdapterLiveOptions,
 } from "./OpenCodeAdapter.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
@@ -107,7 +108,7 @@ const runtimeMock = {
     subscribedEvents: [] as Array<unknown | Promise<unknown>>,
     eventSubscribeObserved: null as (() => void) | null,
     eventStreamError: null as ((cause: unknown) => void) | null,
-    permissionReplyCalls: [] as Array<{ requestID: string; reply: string }>,
+    permissionReplyCalls: [] as Array<{ requestID: string; reply: string; interactive?: boolean }>,
     permissionReplyImplementation: null as ((signal?: AbortSignal) => Promise<void>) | null,
     permissionReplySignals: [] as AbortSignal[],
     questionReplyCalls: [] as Array<{
@@ -514,10 +515,18 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           };
         },
         reply: async (
-          { requestID, reply }: { requestID: string; reply: string },
+          {
+            requestID,
+            reply,
+            interactive,
+          }: { requestID: string; reply: string; interactive?: boolean },
           options?: { signal?: AbortSignal },
         ) => {
-          runtimeMock.state.permissionReplyCalls.push({ requestID, reply });
+          runtimeMock.state.permissionReplyCalls.push({
+            requestID,
+            reply,
+            ...(interactive !== undefined ? { interactive } : {}),
+          });
           if (options?.signal) runtimeMock.state.permissionReplySignals.push(options.signal);
           if (runtimeMock.state.permissionReplyImplementation) {
             await runtimeMock.state.permissionReplyImplementation(options?.signal);
@@ -596,26 +605,26 @@ const openCodeAdapterTestSettings = Schema.decodeSync(OpenCodeSettings)({
   serverPassword: "secret-password",
 });
 
-const OpenCodeAdapterTestLayer = Layer.effect(
-  OpenCodeAdapter,
-  makeOpenCodeAdapter(openCodeAdapterTestSettings),
-).pipe(
-  Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
-  Layer.provideMerge(
-    ServerSettingsService.layerTest({
-      providers: {
-        opencode: {
-          binaryPath: "fake-opencode",
-          serverUrl: "http://127.0.0.1:9999",
-          serverPassword: "secret-password",
+const makeAdapterTestLayer = (options?: OpenCodeAdapterLiveOptions) =>
+  Layer.effect(OpenCodeAdapter, makeOpenCodeAdapter(openCodeAdapterTestSettings, options)).pipe(
+    Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerSettingsService.layerTest({
+        providers: {
+          opencode: {
+            binaryPath: "fake-opencode",
+            serverUrl: "http://127.0.0.1:9999",
+            serverPassword: "secret-password",
+          },
         },
-      },
-    }),
-  ),
-  Layer.provideMerge(providerSessionDirectoryTestLayer),
-  Layer.provideMerge(NodeServices.layer),
-);
+      }),
+    ),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+const OpenCodeAdapterTestLayer = makeAdapterTestLayer();
 
 beforeEach(() => {
   runtimeMock.reset();
@@ -8011,6 +8020,151 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(sessions.length, 1);
       NodeAssert.equal(sessions[0]?.threadId, "thread-native-log-failure");
       NodeAssert.deepEqual(closeCallsDuringRun, []);
+    }),
+  );
+});
+
+// Exercise Kilo's native-child routing with the same SDK boundary as OpenCode.
+it.layer(
+  makeAdapterTestLayer({
+    provider: ProviderDriverKind.make("kilo"),
+    streamChildActivity: true,
+    interactivePermissionReplies: true,
+    requiresInteractiveApproval: (request) => Boolean(request.metadata.skillShell),
+  }),
+)("Kilo native event routing", (it) => {
+  it.effect("keeps child output and idle state separate from the parent turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const push = makeOpenCodeEventQueue();
+      const threadId = asThreadId("kilo-child-output");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Work",
+        modelSelection: { instanceId: ProviderInstanceId.make("kilo"), model: "kilo/auto" },
+      });
+      const parent = "http://127.0.0.1:9999/session";
+      push({
+        type: "session.created",
+        properties: { info: { id: "child", parentID: parent, title: "Child work" } },
+      });
+      push({
+        type: "session.updated",
+        properties: { info: { id: "child", parentID: parent, title: "Child work" } },
+      });
+      push({
+        type: "message.updated",
+        properties: { info: { id: "child-msg", sessionID: "child", role: "assistant" } },
+      });
+      push({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "child-text",
+            sessionID: "child",
+            messageID: "child-msg",
+            type: "text",
+            text: "Child progress",
+            time: { start: 1 },
+          },
+        },
+      });
+      push({
+        type: "message.part.delta",
+        properties: {
+          sessionID: "child",
+          messageID: "child-msg",
+          partID: "child-text",
+          field: "text",
+          delta: " continues",
+        },
+      });
+      push({
+        type: "session.status",
+        properties: { sessionID: "child", status: { type: "idle" } },
+      });
+      push({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "foreign-text",
+            sessionID: "unrelated",
+            messageID: "foreign-msg",
+            type: "text",
+            text: "Unrelated work",
+            time: { start: 1 },
+          },
+        },
+      });
+      push({
+        type: "message.updated",
+        properties: { info: { id: "parent-msg", sessionID: parent, role: "assistant" } },
+      });
+      push({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "parent-text",
+            sessionID: parent,
+            messageID: "parent-msg",
+            type: "text",
+            text: "Parent answer",
+            time: { start: 1 },
+          },
+        },
+      });
+      push({ type: "session.status", properties: { sessionID: parent, status: { type: "idle" } } });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events.filter((event) => event.type === "task.started").length, 1);
+      NodeAssert.ok(
+        events.some(
+          (event) =>
+            event.type === "task.progress" &&
+            event.payload.description === "Child progress continues",
+        ),
+      );
+      NodeAssert.deepEqual(
+        events
+          .filter((event) => event.type === "content.delta")
+          .map((event) => event.payload.delta),
+        ["Parent answer"],
+      );
+      NodeAssert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      NodeAssert.ok(events.every((event) => event.provider === "kilo"));
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+  it.effect("requires a human reply for interactive-only permissions even in Full access", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const push = makeOpenCodeEventQueue();
+      const threadId = asThreadId("kilo-interactive-permission");
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      const openedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "request.opened"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      push({
+        type: "permission.asked",
+        properties: {
+          ...permissionRequest("interactive", "http://127.0.0.1:9999/session"),
+          metadata: { skillShell: true },
+        },
+      });
+      NodeAssert.equal(Option.getOrThrow(yield* Fiber.join(openedFiber)).requestId, "interactive");
+      NodeAssert.deepEqual(runtimeMock.state.permissionReplyCalls, []);
+      yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("interactive"), "accept");
+      NodeAssert.deepEqual(runtimeMock.state.permissionReplyCalls, [
+        { requestID: "interactive", reply: "once", interactive: true },
+      ]);
+      yield* adapter.stopSession(threadId);
     }),
   );
 });
