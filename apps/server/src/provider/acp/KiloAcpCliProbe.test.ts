@@ -31,7 +31,7 @@ import {
   startKiloAcpRuntime,
 } from "./KiloAcpSupport.ts";
 
-const encodeFixtureConfig = Schema.encodeSync(Schema.UnknownFromJsonString);
+const encodeFixtureConfig = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const hasExplicitIsolatedXdg = [
   "XDG_CONFIG_HOME",
