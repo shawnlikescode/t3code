@@ -25,6 +25,7 @@ import { ServerConfig } from "../../config.ts";
 import { makeKiloSdkAdapter } from "./KiloSdkAdapter.ts";
 import {
   startKiloAcpRuntime,
+  buildKiloChildAgentPolicyEnvironment,
   hardenKiloProbeEnvironment,
   KILO_PROVIDER_DEFAULT_MODEL_ID,
 } from "../acp/KiloAcpSupport.ts";
@@ -111,9 +112,20 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && hasExplicitIsolatedXdg)(
                     prompt: "Read .env.schema",
                     subagent_type: "general",
                   };
-            const done = interactive ? interactiveDone : Boolean(result);
+            const legacySeed = JSON.stringify(
+              body.messages.findLast((message) => message.role === "user")?.content,
+            ).includes("Seed legacy");
+            const done = legacySeed || (interactive ? interactiveDone : Boolean(result));
             const delta = done
-              ? { content: interactive ? "INTERACTIVE_DONE" : child ? "CHILD_DONE" : "PARENT_DONE" }
+              ? {
+                  content: legacySeed
+                    ? "LEGACY_DONE"
+                    : interactive
+                      ? "INTERACTIVE_DONE"
+                      : child
+                        ? "CHILD_DONE"
+                        : "PARENT_DONE",
+                }
               : {
                   tool_calls: [
                     {
@@ -172,16 +184,28 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && hasExplicitIsolatedXdg)(
               }),
             };
             const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-            const legacy = yield* startKiloAcpRuntime({
-              kiloSettings: { binaryPath: "kilo" },
+            const policy = buildKiloChildAgentPolicyEnvironment({
               environment,
-              cwd,
-              childProcessSpawner,
-              clientInfo: { name: "t3-sdk-migration-fixture", version: "1" },
-            }).pipe(
-              Effect.map(({ started }) => ({ schemaVersion: 1, sessionId: started.sessionId })),
-              Effect.scoped,
-            );
+              nonce: "migration-fixture",
+              policy: "full-access",
+              label: "Full access fixture",
+              prompt: "Run fixture",
+            });
+            if (!policy.ok) throw new Error(policy.message);
+            const legacy = yield* Effect.gen(function* () {
+              const { started, runtime } = yield* startKiloAcpRuntime({
+                kiloSettings: { binaryPath: "kilo" },
+                environment: policy.environment,
+                cwd,
+                childProcessSpawner,
+                clientInfo: { name: "t3-sdk-migration-fixture", version: "1" },
+              });
+              yield* runtime.setMode(policy.modeId);
+              yield* runtime
+                .prompt({ prompt: [{ type: "text", text: "Seed legacy history." }] })
+                .pipe(Effect.timeout("15 seconds"));
+              return { schemaVersion: 1, sessionId: started.sessionId };
+            }).pipe(Effect.scoped);
             const adapter = yield* makeKiloSdkAdapter(fixtureSettings, { environment });
             const threadId = ThreadId.make("kilo-sdk-fixture");
             const events: ProviderRuntimeEvent[] = [];
@@ -222,6 +246,9 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && hasExplicitIsolatedXdg)(
             expect(session.resumeCursor).toEqual(legacy);
             yield* adapter.sendTurn({ threadId, input: "Run the task fixture." });
             yield* Deferred.await(completion).pipe(Effect.timeout("15 seconds"));
+            expect(events.find((event) => event.type === "turn.completed")?.payload).toMatchObject({
+              state: "completed",
+            });
             expect(childRead).toBe(true);
             expect(events.some((event) => event.type === "task.started")).toBe(true);
             expect(

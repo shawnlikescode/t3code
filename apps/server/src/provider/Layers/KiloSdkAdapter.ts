@@ -55,6 +55,9 @@ export const makeKiloSdkAdapter = (settings: KiloSettings, options?: OpenCodeAda
       {
         ...options,
         provider: PROVIDER,
+        // ACP persisted nonce-scoped agent names in user messages. Explicitly
+        // select a native agent so resumed prompts never inherit a removed name.
+        defaultAgent: "code",
         interactivePermissionReplies: true,
         requiresInteractiveApproval: (request) =>
           Boolean(request.metadata.skillShell || request.metadata.sandboxEscalation),

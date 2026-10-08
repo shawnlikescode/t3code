@@ -8028,6 +8028,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 it.layer(
   makeAdapterTestLayer({
     provider: ProviderDriverKind.make("kilo"),
+    defaultAgent: "code",
     streamChildActivity: true,
     interactivePermissionReplies: true,
     requiresInteractiveApproval: (request) => Boolean(request.metadata.skillShell),
@@ -8049,6 +8050,7 @@ it.layer(
         input: "Work",
         modelSelection: { instanceId: ProviderInstanceId.make("kilo"), model: "kilo/auto" },
       });
+      NodeAssert.equal((runtimeMock.state.promptCalls[0] as { agent?: string }).agent, "code");
       const parent = "http://127.0.0.1:9999/session";
       push({
         type: "session.created",

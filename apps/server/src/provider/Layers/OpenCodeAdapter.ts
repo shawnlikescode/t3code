@@ -466,6 +466,7 @@ function takeOpenCodeTurnTokenUsage(
 
 export interface OpenCodeAdapterLiveOptions {
   readonly provider?: ProviderDriverKind;
+  readonly defaultAgent?: string;
   readonly resolveModelSlug?: (
     client: OpencodeClient,
     model: string | undefined,
@@ -3387,7 +3388,8 @@ export function makeOpenCodeAdapter(
             context.turnTokenUsage = makeOpenCodeTurnTokenUsageAccumulator();
           }
           context.turnTokenUsage?.promptMessageIds.add(messageId);
-          context.activeAgent = agent ?? (input.interactionMode === "plan" ? "plan" : undefined);
+          context.activeAgent =
+            agent ?? (input.interactionMode === "plan" ? "plan" : options?.defaultAgent);
           context.activeVariant = variant;
           if (steeringTurnId === undefined) {
             context.awaitingBusyAfterInterruption = context.interruptedTurnId !== undefined;
