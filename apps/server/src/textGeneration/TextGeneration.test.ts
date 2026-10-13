@@ -8,12 +8,12 @@ import { describe, expect } from "vite-plus/test";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 
-import type { ProviderInstance } from "../provider/ProviderDriver.ts";
-import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as Layer from "effect/Layer";
-import { buildThreadTitlePrompt } from "./TextGenerationPrompts.ts";
+import { buildThreadTitlePrompt } from "@t3tools/provider-core/server/textGenerationPrompts";
 
 const makeStubTextGeneration = (
   overrides: Partial<TextGeneration.TextGeneration["Service"]>,
@@ -24,12 +24,13 @@ const makeStubTextGeneration = (
     generatePrContent: () => Effect.die("generatePrContent stub not configured for this test"),
     generateBranchName: () => Effect.die("generateBranchName stub not configured for this test"),
     generateThreadTitle: () => Effect.die("generateThreadTitle stub not configured for this test"),
+    generateReviewGuide: () => Effect.die("generateReviewGuide stub not configured for this test"),
     ...overrides,
   });
 
 const makeStubInstance = (
   instanceId: ProviderInstanceId,
-  textGeneration: TextGeneration.TextGeneration["Service"] | null,
+  textGeneration: TextGeneration.TextGeneration["Service"],
 ): ProviderInstance =>
   ({
     instanceId,
@@ -41,7 +42,7 @@ const makeStubInstance = (
     displayName: undefined,
     enabled: true,
     snapshot: {} as ProviderInstance["snapshot"],
-    adapter: {} as ProviderInstance["adapter"],
+    orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
     textGeneration,
   }) satisfies ProviderInstance;
 
@@ -173,36 +174,6 @@ describe("TextGeneration.make", () => {
         expect(result.failure._tag).toBe("TextGenerationError");
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
-      }
-    }),
-  );
-
-  it.effect("fails closed when the selected instance does not support text generation", () =>
-    Effect.gen(function* () {
-      const kiloId = ProviderInstanceId.make("kilo");
-      const tg = yield* TextGeneration.make.pipe(
-        Effect.provideService(
-          ProviderInstanceRegistry.ProviderInstanceRegistry,
-          makeStubRegistry([makeStubInstance(kiloId, null)]),
-        ),
-        Effect.provide(
-          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
-            resolveLink: () => Effect.die("Kilo text generation must fail before link resolution"),
-          }),
-        ),
-      );
-
-      const result = yield* tg
-        .generateThreadTitle({
-          cwd: process.cwd(),
-          message: "Do not launch a fallback provider",
-          modelSelection: createModelSelection(kiloId, "__t3_provider_default__"),
-        })
-        .pipe(Effect.result);
-
-      expect(Result.isFailure(result)).toBe(true);
-      if (Result.isFailure(result)) {
-        expect(result.failure.detail).toContain("does not support automatic text generation");
       }
     }),
   );

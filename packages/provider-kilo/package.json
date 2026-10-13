@@ -1,0 +1,39 @@
+{
+  "name": "@t3tools/provider-kilo",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./settings": {
+      "types": "./src/settings.ts",
+      "import": "./src/settings.ts"
+    },
+    "./client": {
+      "types": "./src/client.ts",
+      "import": "./src/client.ts"
+    },
+    "./server": {
+      "types": "./src/server.ts",
+      "import": "./src/server.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc-rs --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir ."
+  },
+  "dependencies": {
+    "@kilocode/sdk": "7.8.8",
+    "@opencode-ai/sdk": "^1.3.15",
+    "@t3tools/contracts": "workspace:*",
+    "@t3tools/provider-core": "workspace:*",
+    "@t3tools/provider-opencode": "workspace:*",
+    "@t3tools/shared": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@t3tools/provider-testing": "workspace:*",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}
