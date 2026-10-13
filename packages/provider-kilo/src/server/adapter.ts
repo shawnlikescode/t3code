@@ -49,6 +49,7 @@ export const makeKiloSdkAdapter = Effect.fn("makeKiloSdkAdapter")(function* (
     settings: decodeSettings({ binaryPath: settings.binaryPath, serverPassword: password }),
     provider: ProviderDriverKind.make("kilo"),
     defaultAgent: "code",
+    steeringRequiresAssistantAcknowledgement: true,
     interactivePermissionReplies: true,
     sessionEnvironment: (policy) => ({
       ...enforceKiloInteractiveModeEnvironment(options.environment, policy.runtimeMode),

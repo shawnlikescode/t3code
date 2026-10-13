@@ -290,6 +290,7 @@ interface ActiveOpenCodeTurn {
   nextItemOrdinal: number;
   nativeUserMessageId: string | null;
   admissionMessageId: string | null;
+  steeringMessageId?: string | null;
   interrupted: boolean;
   finalized: boolean;
   planId: PlanId | null;
@@ -433,6 +434,7 @@ export interface OpenCodeAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly provider?: ProviderDriverKind;
   readonly defaultAgent?: string;
+  readonly steeringRequiresAssistantAcknowledgement?: boolean;
   readonly resolveModelSlug?: (
     client: ReturnType<OpenCodeRuntime.OpenCodeRuntime["Service"]["createOpenCodeSdkClient"]>,
     model: string,
@@ -2464,6 +2466,11 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           const message = event.properties.info;
           state.messageRoles.set(message.id, message.role);
           if (message.role === "assistant") {
+            const turn = state.activeTurn;
+            if (turn?.steeringMessageId && message.parentID === turn.steeringMessageId) {
+              turn.steeringMessageId = null;
+              advanceOpenCodePromptAdmission(turn, "assistant-completed");
+            }
             const usage = state.activeTurn?.usage;
             if (usage === undefined) return;
             const prior = usage.assistantOwnershipByMessageId.get(message.id);
@@ -2503,7 +2510,12 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             turn.nativeUserMessageId = message.id;
             yield* emitProviderTurn(state, turn, "running", null);
           }
-          if (turn !== null && matchesAdmission && turn.admissionPending) {
+          if (
+            turn !== null &&
+            matchesAdmission &&
+            turn.admissionPending &&
+            !turn.steeringMessageId
+          ) {
             if (advanceOpenCodePromptAdmission(turn, "user-message") === "reconcile-idle") {
               yield* reconcilePromptAdmission(state, turn);
             }
@@ -2592,7 +2604,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           // completed assistant message is definitive admission evidence, so
           // let the following idle event settle the turn without weakening
           // the stale-user-message guard.
-          advanceOpenCodePromptAdmission(turn, "assistant-completed");
+          if (!turn.steeringMessageId) advanceOpenCodePromptAdmission(turn, "assistant-completed");
           for (const partId of turn.partIdsByMessage.get(message.id) ?? []) {
             const part = turn.parts.get(partId);
             if (part?.type === "text" || part?.type === "reasoning") {
@@ -3427,6 +3439,12 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               ];
               turn.admissionGeneration = state.nextAdmissionGeneration++;
               turn.admissionMessageId = yield* makeOpenCodeMessageId(messageIdClock);
+              // Kilo finishes the superseded response before running a queued
+              // steer. Its user-message and idle events are not acknowledgement
+              // that the new prompt has started; wait for its assistant parent ID.
+              if (options.steeringRequiresAssistantAcknowledgement) {
+                turn.steeringMessageId = turn.admissionMessageId;
+              }
               turn.admissionPending = true;
               turn.admissionAccepted = false;
               turn.admissionMessageObserved = false;
@@ -3459,7 +3477,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   ]).pipe(Effect.asVoid),
                 ),
               );
-              if (state.activeTurn === turn && !turn.finalized) {
+              if (state.activeTurn === turn && !turn.finalized && !turn.steeringMessageId) {
                 const admissionAction = advanceOpenCodePromptAdmission(turn, "accepted");
                 if (admissionAction === "reconcile-idle") {
                   yield* reconcilePromptAdmission(state, turn);

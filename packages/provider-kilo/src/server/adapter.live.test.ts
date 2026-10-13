@@ -46,7 +46,7 @@ const layer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V2 CLI", () => {
   it.live(
-    "resumes legacy agents and streams child progress, approvals, questions, model switches, and Stop",
+    "resumes legacy agents and streams child progress, approvals, questions, model switches, steering, and Stop",
     () =>
       Effect.gen(function* () {
         const cwd = yield* Effect.promise(() =>
@@ -58,6 +58,11 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
         let requests = 0;
         let childRead = false;
         const models: string[] = [];
+        let releaseBusySteering = () => {};
+        let signalBusySteeringStarted = () => {};
+        const busySteeringStarted = new Promise<void>((resolve) => {
+          signalBusySteeringStarted = resolve;
+        });
         let signalWaitingStarted = () => {};
         const waitingStarted = new Promise<void>((resolve) => {
           signalWaitingStarted = resolve;
@@ -88,48 +93,91 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
             else signalWaitingStarted();
             return;
           }
+          const steering = body.model === "steering";
+          const steered =
+            steering &&
+            JSON.stringify(
+              body.messages.findLast((message) => message.role === "user")?.content,
+            ).includes("STEER_NOW");
+          const busySteering = body.model === "steering-busy";
+          const busySteered =
+            busySteering &&
+            JSON.stringify(
+              body.messages.findLast((message) => message.role === "user")?.content,
+            ).includes("STEER_BUSY");
+          if (busySteering && !busySteered) {
+            response.writeHead(200, { "Content-Type": "text/event-stream" });
+            response.write(
+              `data: ${JSON.stringify({ id: "busy", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: "OLD_RESPONSE" }, finish_reason: null }] })}\n\n`,
+            );
+            releaseBusySteering = () =>
+              response.end(
+                `data: ${JSON.stringify({ id: "busy", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+              );
+            signalBusySteeringStarted();
+            return;
+          }
           const interactive = body.model === "interactive";
           const toolResults = body.messages.filter((message) => message.role === "tool");
           const interactiveDone = interactive && toolResults.length >= 2;
-          const tool = interactive
-            ? toolResults.length
-              ? "question"
-              : "bash"
-            : child
-              ? "read"
-              : "task";
-          const args = interactive
-            ? toolResults.length
-              ? {
-                  questions: [
-                    {
-                      header: "Scope",
-                      question: "Choose the fixture scope",
-                      options: [{ label: "Workspace", description: "Use this workspace" }],
-                    },
-                  ],
-                }
-              : { command: "pwd", description: "Print fixture path" }
-            : child
-              ? { filePath: NodePath.join(cwd, ".env.schema") }
-              : {
-                  description: "Read fixture",
-                  prompt: "Read .env.schema",
-                  subagent_type: "general",
-                };
+          const tool = steering
+            ? "question"
+            : interactive
+              ? toolResults.length
+                ? "question"
+                : "bash"
+              : child
+                ? "read"
+                : "task";
+          const args = steering
+            ? {
+                questions: [
+                  {
+                    header: "Scope",
+                    question: "Choose the fixture scope",
+                    options: [{ label: "Workspace", description: "Use this workspace" }],
+                  },
+                ],
+              }
+            : interactive
+              ? toolResults.length
+                ? {
+                    questions: [
+                      {
+                        header: "Scope",
+                        question: "Choose the fixture scope",
+                        options: [{ label: "Workspace", description: "Use this workspace" }],
+                      },
+                    ],
+                  }
+                : { command: "pwd", description: "Print fixture path" }
+              : child
+                ? { filePath: NodePath.join(cwd, ".env.schema") }
+                : {
+                    description: "Read fixture",
+                    prompt: "Read .env.schema",
+                    subagent_type: "general",
+                  };
           const legacySeed = JSON.stringify(
             body.messages.findLast((message) => message.role === "user")?.content,
           ).includes("Seed legacy");
-          const done = legacySeed || (interactive ? interactiveDone : Boolean(result));
+          const done =
+            busySteered ||
+            legacySeed ||
+            (steering ? steered : interactive ? interactiveDone : Boolean(result));
           const delta = done
             ? {
-                content: legacySeed
-                  ? "LEGACY_DONE"
-                  : interactive
-                    ? "INTERACTIVE_DONE"
-                    : child
-                      ? "CHILD_DONE"
-                      : "PARENT_DONE",
+                content: busySteered
+                  ? "STEERING_BUSY_DONE"
+                  : steered
+                    ? "STEERING_DONE"
+                    : legacySeed
+                      ? "LEGACY_DONE"
+                      : interactive
+                        ? "INTERACTIVE_DONE"
+                        : child
+                          ? "CHILD_DONE"
+                          : "PARENT_DONE",
               }
             : {
                 tool_calls: [
@@ -172,10 +220,15 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
                 npm: "@ai-sdk/openai-compatible",
                 options: { baseURL: `http://127.0.0.1:${address.port}/v1`, apiKey: "fixture" },
                 models: Object.fromEntries(
-                  ["model", "switched", "interactive", "waiting", "childwaiting"].map((name) => [
-                    name,
-                    { name, limit: { context: 100000, output: 1000 } },
-                  ]),
+                  [
+                    "model",
+                    "switched",
+                    "interactive",
+                    "waiting",
+                    "childwaiting",
+                    "steering",
+                    "steering-busy",
+                  ].map((name) => [name, { name, limit: { context: 100000, output: 1000 } }]),
                 ),
               },
             },
@@ -223,6 +276,7 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
                 ...(existing ? { existingProviderThread: existing } : {}),
               });
               const events: ProviderAdapter.ProviderAdapterV2Event[] = [];
+              const steeringQuestion = yield* Deferred.make<void>();
               let completion = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2Event>();
               let activeProviderTurnId: ProviderTurnId | undefined;
               const childStopped = yield* Deferred.make<void>();
@@ -230,6 +284,14 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
                 Stream.runForEach((event) =>
                   Effect.gen(function* () {
                     events.push(event);
+                    if (
+                      event.type === "runtime_request.updated" &&
+                      event.runtimeRequest.status === "pending" &&
+                      selection.model === "fixture/steering"
+                    ) {
+                      yield* Deferred.succeed(steeringQuestion, undefined);
+                      return;
+                    }
                     if (
                       event.type === "subagent.updated" &&
                       ["completed", "failed", "interrupted", "cancelled"].includes(
@@ -325,11 +387,15 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
               const finish = () => Deferred.await(completion).pipe(Effect.timeout("20 seconds"));
               return {
                 runtime,
+                threadId,
+                runId: () => RunId.make(`run-${stage}-${ordinal}`),
                 providerThread,
                 events,
                 start,
                 finish,
                 activeTurn: () => activeProviderTurnId,
+                waitForSteeringQuestion: () =>
+                  Deferred.await(steeringQuestion).pipe(Effect.timeout("15 seconds")),
                 waitForChildStop: () =>
                   Deferred.await(childStopped).pipe(Effect.timeout("15 seconds")),
               };
@@ -391,6 +457,19 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
             yield* Effect.promise(() => childWaitingStarted).pipe(Effect.timeout("15 seconds"));
             const turnId = harness.activeTurn();
             if (!turnId) throw new Error("No parent turn");
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: harness.runId(),
+              providerThread: harness.providerThread,
+              providerTurnId: turnId,
+              message: {
+                messageId: MessageId.make("steer-before-stop"),
+                createdBy: "user",
+                creationSource: "web",
+                text: "A queued steer that must stop too.",
+                attachments: [],
+              },
+            });
             yield* harness.runtime.interruptTurn({
               providerThread: harness.providerThread,
               providerTurnId: turnId,
@@ -428,10 +507,73 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
                   event.runtimeRequest.kind !== "user_input",
               ),
             ).toBe(true);
+            yield* harness.start("Ask before proceeding.", "fixture/steering");
+            yield* harness.waitForSteeringQuestion();
+            const steeringTurnId = harness.activeTurn();
+            if (!steeringTurnId) throw new Error("No steering turn");
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: harness.runId(),
+              providerThread: harness.providerThread,
+              providerTurnId: steeringTurnId,
+              message: {
+                messageId: MessageId.make("steer-question"),
+                createdBy: "user",
+                creationSource: "web",
+                text: "STEER_NOW use the workspace and continue.",
+                attachments: [],
+              },
+            });
+            yield* harness.finish();
+            expect(
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" && event.message.text.includes("STEERING_DONE"),
+              ),
+            ).toBe(true);
+            yield* harness.start("Begin a long response.", "fixture/steering-busy");
+            yield* Effect.promise(() => busySteeringStarted).pipe(Effect.timeout("15 seconds"));
+            const busyTurnId = harness.activeTurn();
+            if (!busyTurnId) throw new Error("No busy steering turn");
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: harness.runId(),
+              providerThread: harness.providerThread,
+              providerTurnId: busyTurnId,
+              message: {
+                messageId: MessageId.make("steer-busy"),
+                createdBy: "user",
+                creationSource: "web",
+                text: "STEER_BUSY continue with the new instructions.",
+                attachments: [],
+              },
+            });
+            releaseBusySteering();
+            yield* harness.finish();
+            expect(
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" &&
+                  event.message.text.includes("STEERING_BUSY_DONE"),
+              ),
+            ).toBe(true);
             yield* harness.start("Wait.", "fixture/waiting");
             yield* Effect.promise(() => waitingStarted);
             const turnId = harness.activeTurn();
             if (!turnId) throw new Error("No active turn");
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: harness.runId(),
+              providerThread: harness.providerThread,
+              providerTurnId: turnId,
+              message: {
+                messageId: MessageId.make("steer-before-stop"),
+                createdBy: "user",
+                creationSource: "web",
+                text: "A queued steer that must stop too.",
+                attachments: [],
+              },
+            });
             yield* harness.runtime.interruptTurn({
               providerThread: harness.providerThread,
               providerTurnId: turnId,
