@@ -389,6 +389,7 @@ interface OpenCodeThreadState {
   readonly messageRoles: Map<string, "user" | "assistant">;
   readonly userMessageIds: Array<string>;
   parentSubagent: OpenCodeSubagentContext | null;
+  nativeChildUserOrdinals?: ReadonlyMap<string, number>;
   nextChildTurnOrdinal: number;
   nextAdmissionGeneration: number;
 }
@@ -411,7 +412,10 @@ function topLevelRequestOwner(state: OpenCodeThreadState): OpenCodeRequestOwner 
     subagent = owner.parentSubagent;
     owner = subagent.parentState;
   }
-  return owner.activeTurn === null ? undefined : { state: owner, turn: owner.activeTurn, subagent };
+  // A background child retains its owning policy after the root turn settles.
+  // Dropping that owner strands native approval requests with no UI or reply.
+  const turn = subagent?.parentTurn ?? owner.activeTurn;
+  return turn == null || turn.interrupted ? undefined : { state: owner, turn, subagent };
 }
 
 interface PendingOpenCodeRequest {
@@ -1458,19 +1462,41 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   permission: childPermission,
                 }),
             );
-            threads.set(childSessionId, {
-              nativeSessionId: childSessionId,
-              providerThread: childProviderThread,
-              appThread: childThread,
-              activeTurn: null,
-              providerTurns: new Map(),
-              runtimeRequests: new Map(),
-              messageRoles: new Map(),
-              userMessageIds: [],
-              parentSubagent: context,
-              nextChildTurnOrdinal: 1,
-              nextAdmissionGeneration: 1,
-            });
+            const existingChildState = threads.get(childSessionId);
+            const childMessages =
+              typeof client.session.messages === "function"
+                ? unwrapData(
+                    "session.messages",
+                    yield* sdkCall("session.messages", { sessionID: childSessionId }, () =>
+                      client.session.messages({ sessionID: childSessionId }),
+                    ),
+                  )
+                : [];
+            const nativeChildUserOrdinals = new Map(
+              childMessages
+                .filter((entry) => entry.info.role === "user")
+                .map((entry, index) => [entry.info.id, index + 1]),
+            );
+            if (existingChildState !== undefined) {
+              existingChildState.nativeChildUserOrdinals = nativeChildUserOrdinals;
+            }
+            threads.set(
+              childSessionId,
+              existingChildState ?? {
+                nativeSessionId: childSessionId,
+                providerThread: childProviderThread,
+                appThread: childThread,
+                activeTurn: null,
+                providerTurns: new Map(),
+                runtimeRequests: new Map(),
+                messageRoles: new Map(),
+                userMessageIds: [],
+                nextChildTurnOrdinal: nativeChildUserOrdinals.size + 1,
+                nextAdmissionGeneration: 1,
+                parentSubagent: context,
+                nativeChildUserOrdinals,
+              },
+            );
             yield* emitProviderEvent({
               type: "app_thread.created",
               driver: OPENCODE_PROVIDER,
@@ -1484,8 +1510,22 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           }
           const output = toolOutput(part);
           if (part.state.status === "completed" && output !== undefined) context.result = output;
-          const status = toolStatus(part);
-          const completedAt = toolCompletedAt(part, now);
+          const toolState = toolStatus(part);
+          const background =
+            part.state.status === "completed" &&
+            recordValue(part.state.metadata, "background") === true;
+          const backgroundState = output?.match(/<task\b[^>]*\bstate=["']([^"']+)["']/)?.[1];
+          const reportsRunning =
+            background &&
+            (backgroundState === "running" ||
+              (backgroundState === undefined &&
+                (busySessionIds.has(childSessionId ?? "") ||
+                  output === "Background task started")));
+          const status = reportsRunning
+            ? { ...toolState, item: "running" as const, node: "running" as const }
+            : toolState;
+          if (reportsRunning) context.result = null;
+          const completedAt = reportsRunning ? null : toolCompletedAt(part, now);
           const subagentStatus: OrchestrationV2Subagent["status"] =
             status.item === "failed"
               ? "failed"
@@ -2289,13 +2329,18 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             driver: OPENCODE_PROVIDER,
             nativeTurnId: message.id,
           });
+          // Native task sessions can be reused across task calls and adapter
+          // restarts. Their transcript gives stable ordinals for existing users.
+          const ordinal =
+            state.nativeChildUserOrdinals?.get(message.id) ?? state.nextChildTurnOrdinal;
+          state.nextChildTurnOrdinal = Math.max(state.nextChildTurnOrdinal, ordinal + 1);
           const providerTurn: OrchestrationV2ProviderTurn = {
             id: providerTurnId,
             providerThreadId: state.providerThread.id,
             nodeId: rootNodeId,
             runAttemptId: null,
             nativeTurnRef: providerRef(message.id, "weak"),
-            ordinal: state.nextChildTurnOrdinal++,
+            ordinal,
             status: "running",
             startedAt,
             completedAt: null,
@@ -2530,6 +2575,16 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         ) {
           const part = event.properties.part;
           const state = threads.get(part.sessionID);
+          const taskOwner =
+            part.type === "tool" && part.tool === "task"
+              ? subagentsByNativeItemId.get(part.id)
+              : undefined;
+          if (state !== undefined && part.type === "tool" && taskOwner !== undefined) {
+            // Background task results can arrive after their parent's turn ends
+            // or a newer turn starts. Keep them attached to the launching turn.
+            yield* emitSubagent(state, taskOwner.parentTurn, part);
+            return;
+          }
           const turn = state?.activeTurn;
           if (state === undefined || turn === null || turn === undefined || turn.finalized) return;
           if (part.type === "text" && state.messageRoles.get(part.messageID) === "user") {

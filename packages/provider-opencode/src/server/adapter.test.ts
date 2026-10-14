@@ -149,6 +149,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   nativeSessionId: string,
   client: object,
   queuedPrompt = false,
+  allowBackgroundApprovals = false,
 ) {
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
@@ -163,6 +164,9 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     settings: OPEN_CODE_TEST_SETTINGS,
     environment: {},
     promptRequiresAssistantAcknowledgement: queuedPrompt,
+    ...(allowBackgroundApprovals
+      ? { autoApprovePermission: (request) => !request.metadata.skillShell }
+      : {}),
   }).pipe(
     Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
       connectToOpenCodeServer: () => Effect.succeed({ url: "http://test.invalid", external: true }),
@@ -743,33 +747,46 @@ describe("OpenCodeAdapterV2", () => {
       const root = "ses_root";
       const child = "ses_child";
       let promptId = "";
-      const harness = yield* makeOpenCodeRuntimeHarness("background-child", root, {
-        event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
-        session: {
-          create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
-          get: async () => ({
-            data: { id: child, parentID: root, permission: [], time: { created: 2, updated: 2 } },
-          }),
-          update: async () => ({ data: { id: child, parentID: root } }),
-          promptAsync: async (input: { messageID: string }) => {
-            promptId = input.messageID;
-            return { data: true };
+      let permissionReplies = 0;
+      const harness = yield* makeOpenCodeRuntimeHarness(
+        "background-child",
+        root,
+        {
+          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          permission: {
+            reply: async () => {
+              permissionReplies++;
+              return { data: true };
+            },
           },
-          abort: async () => ({ data: true }),
-          children: async () => ({ data: [] }),
+          session: {
+            create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+            get: async () => ({
+              data: { id: child, parentID: root, permission: [], time: { created: 2, updated: 2 } },
+            }),
+            update: async () => ({ data: { id: child, parentID: root } }),
+            promptAsync: async (input: { messageID: string }) => {
+              promptId = input.messageID;
+              return { data: true };
+            },
+            abort: async () => ({ data: true }),
+            children: async () => ({ data: [] }),
+          },
         },
-      });
+        false,
+        true,
+      );
       const hasPendingBackgroundWork = harness.runtime.hasPendingBackgroundWork;
       if (hasPendingBackgroundWork === undefined) {
         return yield* Effect.die("OpenCode runtime must expose hasPendingBackgroundWork.");
       }
       yield* harness.startTurn();
       const terminal = yield* harness.runtime.events.pipe(
-        Stream.filter((event) => event.type === "turn.terminal"),
-        Stream.runHead,
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
         Effect.forkScoped,
       );
-      const taskPart = (status: "running" | "completed") => ({
+      const taskPart = (status: "running" | "completed", output = "Background task started") => ({
         type: "message.part.updated",
         properties: {
           sessionID: root,
@@ -790,7 +807,7 @@ describe("OpenCodeAdapterV2", () => {
               title: "Background sleep task",
               metadata: { parentSessionId: root, sessionId: child, background: true },
               time: { start: 3, ...(status === "completed" ? { end: 3 } : {}) },
-              ...(status === "completed" ? { output: "Background task started" } : {}),
+              ...(status === "completed" ? { output } : {}),
             },
           },
         },
@@ -819,16 +836,184 @@ describe("OpenCodeAdapterV2", () => {
       yield* push(status(child, "busy"));
       yield* push(taskPart("completed"));
       yield* push(status(root, "idle"));
-      assert.equal(Option.getOrUndefined(yield* Fiber.join(terminal))?.status, "completed");
+      const received = yield* Fiber.join(terminal);
+      assert.equal(received.at(-1)?.type, "turn.terminal");
+      const latestSubagent = received.findLast((event) => event.type === "subagent.updated");
+      assert.equal(
+        latestSubagent?.subagent.status,
+        "running",
+        "a completed task launch is not a completed background worker",
+      );
       assert.isTrue(yield* hasPendingBackgroundWork, "the running child must pin idle release");
 
+      yield* push({
+        type: "permission.asked",
+        properties: {
+          id: "background-permission",
+          sessionID: child,
+          permission: "bash",
+          patterns: ["command -v rg"],
+          metadata: {},
+          always: [],
+        },
+      });
+      yield* TestClock.adjust("8 seconds");
+      assert.equal(
+        permissionReplies,
+        1,
+        "full-access child approvals must not disappear when the parent is idle",
+      );
+      const approval = yield* harness.runtime.events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+        ),
+        Stream.runHead,
+        Effect.forkScoped,
+      );
+      yield* push({
+        type: "permission.asked",
+        properties: {
+          id: "human-background-permission",
+          sessionID: child,
+          permission: "bash",
+          patterns: ["skill command"],
+          metadata: { skillShell: true },
+          always: [],
+        },
+      });
+      const request = Option.getOrThrow(yield* Fiber.join(approval));
+      assert.equal(request.type, "runtime_request.updated");
+      if (request.type === "runtime_request.updated") {
+        yield* harness.runtime.respondToRuntimeRequest({
+          requestId: request.runtimeRequest.id,
+          decision: "accept",
+        });
+      }
+      assert.equal(
+        permissionReplies,
+        2,
+        "human approval stays visible and answerable after the parent ends",
+      );
+      const lateResult = yield* harness.runtime.events.pipe(
+        Stream.filter(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+        ),
+        Stream.runHead,
+        Effect.forkScoped,
+      );
       yield* push(status(child, "idle"));
       yield* push({ type: "session.idle", properties: { sessionID: child } });
+      yield* push(taskPart("completed", "CHILD_DONE"));
+      assert.isTrue(
+        Option.isSome(yield* Fiber.join(lateResult)),
+        "the background result must reach its settled parent",
+      );
       assert.isFalse(yield* hasPendingBackgroundWork, "an idle child must not pin idle release");
     }).pipe(
       Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
       Effect.scoped,
     ),
+  );
+
+  it.effect.each([false, true])(
+    "preserves native child turn numbering when resuming, history=%s",
+    (withHistory) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const root = "resume-root",
+          child = "resume-child";
+        let promptId = "";
+        const harness = yield* makeOpenCodeRuntimeHarness("resume-child", root, {
+          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          session: {
+            create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+            get: async () => ({
+              data: { id: child, parentID: root, permission: [], time: { created: 2, updated: 2 } },
+            }),
+            update: async () => ({ data: { id: child, parentID: root } }),
+            promptAsync: async (input: { messageID: string }) => {
+              promptId = input.messageID;
+              return { data: true };
+            },
+            messages: async () => ({
+              data: withHistory
+                ? [{ info: { id: "historical-user", role: "user" }, parts: [] }]
+                : [],
+            }),
+            children: async () => ({ data: [] }),
+            abort: async () => ({ data: true }),
+          },
+        });
+        yield* harness.startTurn();
+        const received = yield* harness.runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn.terminal" &&
+              event.providerThreadId === harness.providerThread.id,
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
+        yield* push({
+          type: "message.updated",
+          properties: {
+            sessionID: root,
+            info: { id: promptId, sessionID: root, role: "user", time: { created: 1 } },
+          },
+        });
+        for (const index of [1, 2]) {
+          yield* push({
+            type: "message.part.updated",
+            properties: {
+              sessionID: root,
+              part: {
+                id: `task-${index}`,
+                sessionID: root,
+                messageID: "parent-assistant",
+                type: "tool",
+                tool: "task",
+                callID: `call-${index}`,
+                state: {
+                  status: "running",
+                  input: { prompt: "resume", description: "resume", subagent_type: "general" },
+                  metadata: { sessionId: child },
+                  time: { start: index },
+                },
+              },
+            },
+          });
+          yield* push({
+            type: "message.updated",
+            properties: {
+              sessionID: child,
+              info: {
+                id: `child-user-${index}`,
+                sessionID: child,
+                role: "user",
+                time: { created: index },
+              },
+            },
+          });
+          yield* push({ type: "session.idle", properties: { sessionID: child } });
+        }
+        yield* push({ type: "session.idle", properties: { sessionID: root } });
+        const events = yield* Fiber.join(received);
+        const turns = new Map(
+          events
+            .filter(
+              (event) =>
+                event.type === "provider_turn.updated" &&
+                event.providerTurn.providerThreadId !== harness.providerThread.id,
+            )
+            .map((event) => [event.providerTurn.id, event.providerTurn.ordinal]),
+        );
+        assert.deepEqual([...turns.values()], withHistory ? [2, 3] : [1, 2]);
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
   );
 
   it.effect("titles OpenCode reads and searches from their input", () =>
