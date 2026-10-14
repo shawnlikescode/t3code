@@ -290,7 +290,7 @@ interface ActiveOpenCodeTurn {
   nextItemOrdinal: number;
   nativeUserMessageId: string | null;
   admissionMessageId: string | null;
-  steeringMessageId?: string | null;
+  pendingAssistantParentId?: string | null;
   interrupted: boolean;
   finalized: boolean;
   planId: PlanId | null;
@@ -434,7 +434,7 @@ export interface OpenCodeAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly provider?: ProviderDriverKind;
   readonly defaultAgent?: string;
-  readonly steeringRequiresAssistantAcknowledgement?: boolean;
+  readonly promptRequiresAssistantAcknowledgement?: boolean;
   readonly resolveModelSlug?: (
     client: ReturnType<OpenCodeRuntime.OpenCodeRuntime["Service"]["createOpenCodeSdkClient"]>,
     model: string,
@@ -2467,8 +2467,11 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           state.messageRoles.set(message.id, message.role);
           if (message.role === "assistant") {
             const turn = state.activeTurn;
-            if (turn?.steeringMessageId && message.parentID === turn.steeringMessageId) {
-              turn.steeringMessageId = null;
+            if (
+              turn?.pendingAssistantParentId &&
+              message.parentID === turn.pendingAssistantParentId
+            ) {
+              turn.pendingAssistantParentId = null;
               advanceOpenCodePromptAdmission(turn, "assistant-completed");
             }
             const usage = state.activeTurn?.usage;
@@ -2514,7 +2517,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             turn !== null &&
             matchesAdmission &&
             turn.admissionPending &&
-            !turn.steeringMessageId
+            !turn.pendingAssistantParentId
           ) {
             if (advanceOpenCodePromptAdmission(turn, "user-message") === "reconcile-idle") {
               yield* reconcilePromptAdmission(state, turn);
@@ -2604,7 +2607,8 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           // completed assistant message is definitive admission evidence, so
           // let the following idle event settle the turn without weakening
           // the stale-user-message guard.
-          if (!turn.steeringMessageId) advanceOpenCodePromptAdmission(turn, "assistant-completed");
+          if (!turn.pendingAssistantParentId)
+            advanceOpenCodePromptAdmission(turn, "assistant-completed");
           for (const partId of turn.partIdsByMessage.get(message.id) ?? []) {
             const part = turn.parts.get(partId);
             if (part?.type === "text" || part?.type === "reasoning") {
@@ -3270,6 +3274,10 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 nextItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
                 nativeUserMessageId: null,
                 admissionMessageId,
+                pendingAssistantParentId:
+                  options.promptRequiresAssistantAcknowledgement && !isCompaction
+                    ? admissionMessageId
+                    : null,
                 interrupted: false,
                 finalized: false,
                 planId: null,
@@ -3376,7 +3384,12 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   ]).pipe(Effect.asVoid),
                 ),
               );
-              if (state.activeTurn === turn && !turn.finalized && !turn.interrupted) {
+              if (
+                state.activeTurn === turn &&
+                !turn.finalized &&
+                !turn.interrupted &&
+                !turn.pendingAssistantParentId
+              ) {
                 const admissionAction = advanceOpenCodePromptAdmission(turn, "accepted");
                 if (admissionAction === "reconcile-idle") {
                   yield* reconcilePromptAdmission(state, turn);
@@ -3440,10 +3453,10 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               turn.admissionGeneration = state.nextAdmissionGeneration++;
               turn.admissionMessageId = yield* makeOpenCodeMessageId(messageIdClock);
               // Kilo finishes the superseded response before running a queued
-              // steer. Its user-message and idle events are not acknowledgement
+              // prompt. Its user-message and idle events are not acknowledgement
               // that the new prompt has started; wait for its assistant parent ID.
-              if (options.steeringRequiresAssistantAcknowledgement) {
-                turn.steeringMessageId = turn.admissionMessageId;
+              if (options.promptRequiresAssistantAcknowledgement) {
+                turn.pendingAssistantParentId = turn.admissionMessageId;
               }
               turn.admissionPending = true;
               turn.admissionAccepted = false;
@@ -3477,7 +3490,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   ]).pipe(Effect.asVoid),
                 ),
               );
-              if (state.activeTurn === turn && !turn.finalized && !turn.steeringMessageId) {
+              if (state.activeTurn === turn && !turn.finalized && !turn.pendingAssistantParentId) {
                 const admissionAction = advanceOpenCodePromptAdmission(turn, "accepted");
                 if (admissionAction === "reconcile-idle") {
                   yield* reconcilePromptAdmission(state, turn);

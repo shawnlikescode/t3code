@@ -148,6 +148,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   suffix: string,
   nativeSessionId: string,
   client: object,
+  queuedPrompt = false,
 ) {
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
@@ -161,6 +162,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     instanceId,
     settings: OPEN_CODE_TEST_SETTINGS,
     environment: {},
+    promptRequiresAssistantAcknowledgement: queuedPrompt,
   }).pipe(
     Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
       connectToOpenCodeServer: () => Effect.succeed({ url: "http://test.invalid", external: true }),
@@ -2295,6 +2297,100 @@ describe("OpenCodeAdapterV2", () => {
       assert.lengthOf(terminals, 1);
       assert.equal(terminals[0]?.status, "completed");
       assert.isNull(terminals[0]?.failure ?? null);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("keeps a new Kilo run active while an older native prompt hands off", () =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const sessionID = "queued-kilo-start";
+      let promptId = "";
+      const harness = yield* makeOpenCodeRuntimeHarness(
+        "queued-kilo-start",
+        sessionID,
+        {
+          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          session: {
+            create: async () => ({ data: { id: sessionID, time: { created: 1, updated: 1 } } }),
+            get: async () => ({ data: { id: sessionID, time: { created: 1, updated: 1 } } }),
+            promptAsync: async (input: { messageID: string }) => {
+              promptId = input.messageID;
+              return { data: true };
+            },
+            status: async () => ({ data: { [sessionID]: { type: "idle" } } }),
+            messages: async () => ({ data: [] }),
+            children: async () => ({ data: [] }),
+            abort: async () => ({ data: true }),
+          },
+        },
+        true,
+      );
+      yield* harness.startTurn();
+      const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
+      yield* push({
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: { id: promptId, sessionID, role: "user", time: { created: 2 } },
+        },
+      });
+      yield* push({
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: {
+            id: "old-assistant",
+            sessionID,
+            role: "assistant",
+            parentID: "old-user",
+            time: { created: 1, completed: 3 },
+          },
+        },
+      });
+      yield* push({ type: "session.status", properties: { sessionID, status: { type: "idle" } } });
+      yield* push({ type: "session.idle", properties: { sessionID } });
+      const pending = yield* harness.runtime.readThreadSnapshot({
+        providerThread: harness.providerThread,
+      });
+      assert.equal(
+        pending.providerTurns.at(-1)?.status,
+        "running",
+        "old native completion must not close the queued new run",
+      );
+      yield* push({
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: {
+            id: "new-assistant",
+            sessionID,
+            role: "assistant",
+            parentID: promptId,
+            time: { created: 4 },
+          },
+        },
+      });
+      yield* push({
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: {
+            id: "new-assistant",
+            sessionID,
+            role: "assistant",
+            parentID: promptId,
+            time: { created: 4, completed: 5 },
+          },
+        },
+      });
+      yield* push({ type: "session.idle", properties: { sessionID } });
+      const done = yield* harness.runtime.readThreadSnapshot({
+        providerThread: harness.providerThread,
+      });
+      assert.equal(done.providerTurns.at(-1)?.status, "completed");
     }).pipe(
       Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
       Effect.scoped,
