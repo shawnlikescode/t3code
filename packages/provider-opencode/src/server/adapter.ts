@@ -434,6 +434,29 @@ interface PendingOpenCodeRequest {
   readonly question?: QuestionRequest;
 }
 
+/** The native summary replaces earlier messages in model context, while the
+ * provider keeps the original messages available for transcript/history reads. */
+export function estimateOpenCodeCompactedContext(
+  messages: ReadonlyArray<{
+    readonly info: {
+      readonly role: string;
+      readonly summary?: unknown;
+      readonly error?: unknown;
+      readonly time: { readonly created: number; readonly completed?: number };
+    };
+    readonly parts: ReadonlyArray<unknown>;
+  }>,
+): number | null {
+  const summary = messages.findLastIndex(
+    ({ info }) =>
+      info.role === "assistant" &&
+      info.summary === true &&
+      info.time.completed !== undefined &&
+      !info.error,
+  );
+  return summary < 0 ? null : Buffer.byteLength(JSON.stringify(messages.slice(summary)));
+}
+
 export interface OpenCodeAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly provider?: ProviderDriverKind;
@@ -3692,6 +3715,20 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                     cause,
                   }),
               ),
+            ),
+          estimateNativeContext: (snapshotInput) =>
+            sdkCall(
+              "session.messages",
+              { sessionID: nativeThreadId(snapshotInput.providerThread) },
+              () =>
+                client.session.messages({
+                  sessionID: nativeThreadId(snapshotInput.providerThread),
+                }),
+            ).pipe(
+              Effect.map((response) =>
+                estimateOpenCodeCompactedContext(unwrapData("session.messages", response)),
+              ),
+              Effect.orElseSucceed(() => null),
             ),
           readThreadSnapshot: (snapshotInput) =>
             readSnapshot(snapshotInput.providerThread).pipe(

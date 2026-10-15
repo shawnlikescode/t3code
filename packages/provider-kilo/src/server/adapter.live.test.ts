@@ -161,23 +161,28 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
           const legacySeed = JSON.stringify(
             body.messages.findLast((message) => message.role === "user")?.content,
           ).includes("Seed legacy");
+          const compaction = !body.tools?.length;
           const done =
+            compaction ||
             busySteered ||
             legacySeed ||
             (steering ? steered : interactive ? interactiveDone : Boolean(result));
           const delta = done
             ? {
-                content: busySteered
-                  ? "STEERING_BUSY_DONE"
-                  : steered
-                    ? "STEERING_DONE"
-                    : legacySeed
-                      ? "LEGACY_DONE"
-                      : interactive
-                        ? "INTERACTIVE_DONE"
-                        : child
-                          ? "CHILD_DONE"
-                          : "PARENT_DONE",
+                content:
+                  compaction && !legacySeed
+                    ? "COMPACTED_FIXTURE"
+                    : busySteered
+                      ? "STEERING_BUSY_DONE"
+                      : steered
+                        ? "STEERING_DONE"
+                        : legacySeed
+                          ? "LEGACY_DONE"
+                          : interactive
+                            ? "INTERACTIVE_DONE"
+                            : child
+                              ? "CHILD_DONE"
+                              : "PARENT_DONE",
               }
             : {
                 tool_calls: [
@@ -449,6 +454,14 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
             yield* harness.start("Switch model.", "fixture/switched");
             yield* harness.finish();
             expect(models).toContain("switched");
+            yield* harness.start("/compact", "fixture/model");
+            yield* harness.finish();
+            const estimate = harness.runtime.estimateNativeContext;
+            expect(estimate).toBeDefined();
+            const compactedContext = yield* estimate!({ providerThread: harness.providerThread });
+            expect(compactedContext).not.toBeNull();
+            expect(compactedContext).toBeGreaterThan(0);
+            expect(compactedContext).toBeLessThan(16_000);
           }).pipe(Effect.scoped);
           yield* Effect.gen(function* () {
             const harness = yield* open("stop-child", environment);

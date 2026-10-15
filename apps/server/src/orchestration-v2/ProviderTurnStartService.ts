@@ -1034,6 +1034,12 @@ export const layer: Layer.Layer<
       // Legacy attempts lack native identity; exclude their explicitly recovered
       // history, whose attachments were not replayed into the replacement thread.
       const nativeContextEstimate = Effect.gen(function* () {
+        if (sameNativeThread && session.estimateNativeContext !== undefined) {
+          const nativeEstimate = yield* session.estimateNativeContext({
+            providerThread: runningProviderThread,
+          });
+          if (nativeEstimate !== null) return nativeEstimate;
+        }
         return sameNativeThread
           ? (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce((sum, item) => {
               if (

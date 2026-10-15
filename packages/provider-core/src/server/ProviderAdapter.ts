@@ -627,6 +627,11 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly respondToRuntimeRequest: (
     input: ProviderAdapterV2RuntimeRequestResponseInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Conservative allowance for the active native transcript after provider
+   * compaction. Null falls back to saved app history; this is not usage telemetry. */
+  readonly estimateNativeContext?: (
+    input: ProviderAdapterV2ReadThreadSnapshotInput,
+  ) => Effect.Effect<number | null, ProviderAdapterV2Error>;
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;

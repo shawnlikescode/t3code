@@ -1460,6 +1460,64 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
+  it.effect("budgets the compacted native context without deleting readable history", () =>
+    Effect.gen(function* () {
+      const old = {
+        info: { id: "old", role: "user", time: { created: 1 } },
+        parts: [{ type: "text", text: "old history ".repeat(20_000) }],
+      };
+      const summary = {
+        info: {
+          id: "summary",
+          role: "assistant",
+          summary: true,
+          time: { created: 2, completed: 3 },
+        },
+        parts: [{ type: "text", text: "Retained compact summary" }],
+      };
+      const followup = {
+        info: { id: "new", role: "user", time: { created: 4 } },
+        parts: [{ type: "text", text: "continue working" }],
+      };
+      let messages = [old, summary, followup];
+      const nativeEvents = asyncEventStream();
+      const harness = yield* makeOpenCodeRuntimeHarness("compact-budget", "compact-budget", {
+        event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+        session: {
+          create: async () => ({
+            data: { id: "compact-budget", time: { created: 1, updated: 1 } },
+          }),
+          messages: async () => ({ data: messages }),
+        },
+      });
+      const estimate = harness.runtime.estimateNativeContext;
+      assert.isDefined(estimate);
+      const allowance = yield* estimate!({ providerThread: harness.providerThread });
+      assert.isAbove(Buffer.byteLength(JSON.stringify(messages)), 128_000);
+      assert.isNumber(allowance);
+      assert.isBelow(
+        allowance!,
+        4_000,
+        "pre-compaction history must not consume the handoff allowance",
+      );
+      assert.equal(messages.length, 3, "history remains intact for transcript reads");
+      const failedSummary = { ...summary, info: { ...summary.info, error: { name: "APIError" } } };
+      messages = [old, failedSummary];
+      assert.isNull(
+        yield* estimate!({ providerThread: harness.providerThread }),
+        "failed compaction must not grant context space",
+      );
+      messages = [old];
+      assert.isNull(
+        yield* estimate!({ providerThread: harness.providerThread }),
+        "without a completed summary the server must use the original conservative fallback",
+      );
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
   it.effect("compacts with the native summarize API and emits a completed compaction", () =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
