@@ -916,6 +916,93 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
+  it.effect("does not resurrect compacted background launch receipts as live subagents", () =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const root = "historical-task-root",
+        child = "historical-task-child";
+      let promptId = "";
+      const harness = yield* makeOpenCodeRuntimeHarness("historical-task", root, {
+        event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+        session: {
+          create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+          get: async () => ({
+            data: { id: child, parentID: root, permission: [], time: { created: 2, updated: 2 } },
+          }),
+          update: async () => ({ data: { id: child, parentID: root } }),
+          promptAsync: async (input: { messageID: string }) => {
+            promptId = input.messageID;
+            return { data: true };
+          },
+          messages: async () => ({ data: [] }),
+          children: async () => ({ data: [] }),
+          abort: async () => ({ data: true }),
+        },
+      });
+      yield* harness.startTurn();
+      const received = yield* harness.runtime.events.pipe(
+        Stream.takeUntil(
+          (event) =>
+            event.type === "turn.terminal" && event.providerThreadId === harness.providerThread.id,
+        ),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
+      yield* push({
+        type: "message.updated",
+        properties: {
+          sessionID: root,
+          info: { id: promptId, sessionID: root, role: "user", time: { created: 1 } },
+        },
+      });
+      const task = (id: string, compacted: boolean) => ({
+        type: "message.part.updated",
+        properties: {
+          sessionID: root,
+          part: {
+            id,
+            sessionID: root,
+            messageID: "parent-assistant",
+            type: "tool",
+            tool: "task",
+            callID: id,
+            state: {
+              status: "completed",
+              input: {
+                prompt: "STOP NOW",
+                description: "Stop background writer",
+                subagent_type: "general",
+                task_id: child,
+              },
+              output: `<task id="${child}" state="running"><task_result>Additional context sent to the running background task.</task_result></task>`,
+              metadata: { sessionId: child, background: true },
+              time: { start: 2, end: 3, ...(compacted ? { compacted: 4 } : {}) },
+            },
+          },
+        },
+      });
+      yield* push(task("old-task", true));
+      yield* push(task("live-task", false));
+      yield* push({ type: "session.idle", properties: { sessionID: root } });
+      const events = yield* Fiber.join(received);
+      const tasks = events.filter((event) => event.type === "subagent.updated");
+      assert.equal(
+        tasks.length,
+        1,
+        "compaction must not relaunch the old task in the lineage panel",
+      );
+      assert.equal(
+        tasks[0]?.subagent.status,
+        "running",
+        "a new running receipt must still be tracked",
+      );
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
   it.effect.each([false, true])(
     "preserves native child turn numbering when resuming, history=%s",
     (withHistory) =>
@@ -1001,13 +1088,12 @@ describe("OpenCodeAdapterV2", () => {
         yield* push({ type: "session.idle", properties: { sessionID: root } });
         const events = yield* Fiber.join(received);
         const turns = new Map(
-          events
-            .filter(
-              (event) =>
-                event.type === "provider_turn.updated" &&
-                event.providerTurn.providerThreadId !== harness.providerThread.id,
-            )
-            .map((event) => [event.providerTurn.id, event.providerTurn.ordinal]),
+          events.flatMap((event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.providerThreadId !== harness.providerThread.id
+              ? [[event.providerTurn.id, event.providerTurn.ordinal] as const]
+              : [],
+          ),
         );
         assert.deepEqual([...turns.values()], withHistory ? [2, 3] : [1, 2]);
       }).pipe(

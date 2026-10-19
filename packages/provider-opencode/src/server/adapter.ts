@@ -2597,6 +2597,16 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           event: Extract<OpenCodeEvent, { type: "message.part.updated" }>,
         ) {
           const part = event.properties.part;
+          // Compaction prunes and re-emits old tool results. A historical
+          // background launch receipt is not new evidence that its child lives.
+          if (
+            part.type === "tool" &&
+            part.tool === "task" &&
+            part.state.status === "completed" &&
+            part.state.time.compacted !== undefined &&
+            /<task\b[^>]*\bstate=["']running["']/.test(part.state.output)
+          )
+            return;
           const state = threads.get(part.sessionID);
           const taskOwner =
             part.type === "tool" && part.tool === "task"
