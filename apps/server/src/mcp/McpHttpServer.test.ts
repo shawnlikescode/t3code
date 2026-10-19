@@ -838,6 +838,7 @@ it.effect("registers annotated tools and preserves authenticated request context
       const routedRequests: Array<{
         readonly operation: string;
         readonly tabId?: string | undefined;
+        readonly input?: unknown;
       }> = [];
       const events = yield* broker.connect({
         clientId: "mcp-test-client",
@@ -905,6 +906,39 @@ it.effect("registers annotated tools and preserves authenticated request context
         available: true,
         tabId,
       });
+
+      const opened = yield* server
+        .callTool({
+          name: "preview_open",
+          arguments: {
+            url: "https://example.com",
+            tabId: null,
+            open: null,
+            show: null,
+            profileId: null,
+            reuseExistingTab: false,
+          },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(opened.isError).toBe(false);
+      expect(routedRequests.find(({ operation }) => operation === "open")?.input).toEqual({
+        url: "https://example.com",
+        reuseExistingTab: false,
+      });
+      const invalidOpen = yield* server
+        .callTool({
+          name: "preview_open",
+          arguments: { tabId: alternateTabId, reuseExistingTab: false },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.flip,
+        );
+      expect(invalidOpen._tag).toBe("InvalidParams");
 
       const malformed = yield* server
         .callTool({ name: "preview_click", arguments: { selector: "" } })

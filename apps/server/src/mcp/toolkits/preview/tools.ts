@@ -27,6 +27,7 @@ import {
   PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as FileSystem from "effect/FileSystem";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -75,11 +76,33 @@ const PreviewStatusTool = Tool.make("preview_status", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
+// Strict tool clients represent omitted optional arguments as null. Normalize
+// those at the MCP boundary before applying the browser contract's checks.
+const PreviewOpenToolInput = Schema.Struct({
+  tabId: Schema.optional(Schema.NullOr(PreviewAutomationOpenInput.fields.tabId)),
+  url: Schema.optional(Schema.NullOr(PreviewAutomationOpenInput.fields.url)),
+  open: Schema.optional(Schema.NullOr(PreviewAutomationOpenInput.fields.open)),
+  show: Schema.optional(Schema.NullOr(PreviewAutomationOpenInput.fields.show)),
+  reuseExistingTab: Schema.optional(
+    Schema.NullOr(PreviewAutomationOpenInput.fields.reuseExistingTab),
+  ),
+  profileId: Schema.optional(Schema.NullOr(PreviewAutomationOpenInput.fields.profileId)),
+}).pipe(
+  Schema.decodeTo(
+    PreviewAutomationOpenInput,
+    SchemaTransformation.transform({
+      decode: (input) =>
+        Object.fromEntries(Object.entries(input).filter(([, value]) => value !== null)),
+      encode: (input) => input,
+    }),
+  ),
+);
+
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
       "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. Parallel subagents sharing a provider session must each open with reuseExistingTab=false and pass their returned tabId on every call. Pass profileId (an id or name from preview_status profiles) to open under a browser profile and its saved logins; omit it for the user's default profile. Another agent session's tabs can be read but not operated.",
-    parameters: PreviewAutomationOpenInput,
+    parameters: PreviewOpenToolInput,
     success: PreviewAutomationStatus,
     failure: PreviewToolFailure,
     dependencies,
