@@ -23,6 +23,7 @@ import { compareSemverVersions } from "@t3tools/shared/semver";
 
 import {
   buildServerProvider,
+  COMPACT_SLASH_COMMAND,
   isCommandMissingCause,
   spawnAndCollect,
   type ServerProviderDraft,
@@ -80,6 +81,7 @@ export const buildInitialKiloProviderSnapshot = Effect.fn("buildInitialKiloProvi
     if (!kiloSettings.enabled) {
       return buildServerProvider({
         presentation: KILO_PRESENTATION,
+        slashCommands: [COMPACT_SLASH_COMMAND],
         enabled: false,
         checkedAt,
         models,
@@ -95,6 +97,7 @@ export const buildInitialKiloProviderSnapshot = Effect.fn("buildInitialKiloProvi
 
     return buildServerProvider({
       presentation: KILO_PRESENTATION,
+      slashCommands: [COMPACT_SLASH_COMMAND],
       enabled: true,
       checkedAt,
       models,
@@ -237,6 +240,7 @@ export const checkKiloProviderStatus = Effect.fn("checkKiloProviderStatus")(func
   }) =>
     buildServerProvider({
       presentation: KILO_PRESENTATION,
+      slashCommands: [COMPACT_SLASH_COMMAND],
       enabled: kiloSettings.enabled,
       checkedAt,
       models: fallbackModels,
@@ -246,6 +250,7 @@ export const checkKiloProviderStatus = Effect.fn("checkKiloProviderStatus")(func
   if (!kiloSettings.enabled) {
     return buildServerProvider({
       presentation: KILO_PRESENTATION,
+      slashCommands: [COMPACT_SLASH_COMMAND],
       enabled: false,
       checkedAt,
       models: fallbackModels,
@@ -386,6 +391,7 @@ export const checkKiloProviderStatus = Effect.fn("checkKiloProviderStatus")(func
 
   return buildServerProvider({
     presentation: KILO_PRESENTATION,
+    slashCommands: [COMPACT_SLASH_COMMAND],
     enabled: kiloSettings.enabled,
     checkedAt,
     models,

@@ -100,7 +100,7 @@ describe("ProviderModelPicker", () => {
     },
   );
 
-  it.each(["opencode", "antigravity"])(
+  it.each(["opencode", "antigravity", "kilo"])(
     "keeps the selected model label when the %s account catalog does not contain it",
     (driver) => {
       const markup = renderPicker({

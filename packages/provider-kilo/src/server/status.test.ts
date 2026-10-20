@@ -92,6 +92,7 @@ describe("KiloProvider", () => {
         decodeKiloSettings({ enabled: true, binaryPath }),
       ).pipe(Effect.provide(NodeServices.layer));
       expect(snapshot.status).toBe("ready");
+      expect(snapshot.slashCommands.some((command) => command.name === "compact")).toBe(true);
       expect(snapshot.skills).toEqual([]);
       expect(snapshot.models.length).toBeGreaterThan(0);
     }),
@@ -270,6 +271,7 @@ describe("KiloProvider", () => {
         ).pipe(Effect.provide(NodeServices.layer));
         expect(snapshot.status).toBe("error");
         expect(snapshot.models).toEqual([]);
+        expect(snapshot.slashCommands.some((command) => command.name === "compact")).toBe(true);
         expect(snapshot.message).toContain(expected);
       }
     }),
