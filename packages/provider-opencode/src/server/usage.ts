@@ -44,6 +44,7 @@ function parseOpenCodeMessage(
     readonly sessionId?: string;
     readonly timestampMs?: number;
   } = {},
+  provider: "opencode" | "kilo" = "opencode",
 ): UsageRecord | null {
   let parsed: unknown;
   try {
@@ -71,7 +72,7 @@ function parseOpenCodeMessage(
   const id = fallback.id || text(message.id);
   const cost = message.cost;
   return {
-    provider: "opencode",
+    provider,
     timestampMs,
     model,
     sessionId: fallback.sessionId || text(message.sessionID),
@@ -80,7 +81,7 @@ function parseOpenCodeMessage(
     // subscription models. Let the shared price table estimate those records.
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null,
     speed: "standard",
-    dedupeKey: id ? `opencode:${id}` : null,
+    dedupeKey: id ? `${provider}:${id}` : null,
   };
 }
 
@@ -120,9 +121,11 @@ const LEGACY_STAT_BATCH = 256;
 export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
   root: string,
   sinceMs: number,
+  options: { readonly provider?: "opencode" | "kilo"; readonly databaseFile?: string } = {},
 ): Effect.fn.Return<OpenCodeUsageReadResult, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const provider = options.provider ?? "opencode";
   const files: { path: string; records: UsageRecord[] }[] = [];
   const seen = new Set<string>();
   let found = false;
@@ -139,7 +142,14 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
   const databases = yield* fileSystem.readDirectory(root).pipe(
     Effect.flatMap((names) =>
       Effect.filter(
-        names.filter((name) => /^opencode(?:-[a-zA-Z0-9_-]+)?\.db$/.test(name)),
+        names.filter((name) =>
+          options.databaseFile
+            ? name === options.databaseFile
+            : (provider === "kilo"
+                ? /^(?:kilo(?:-[a-zA-Z0-9._-]+)?|opencode-[a-zA-Z0-9._-]+)\.db$/
+                : /^opencode(?:-[a-zA-Z0-9_-]+)?\.db$/
+              ).test(name),
+        ),
         // One database removed between listing and stat must not hide the rest.
         (name) =>
           entryInfo(path.join(root, name)).pipe(
@@ -153,7 +163,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
     ),
     Effect.map((names) =>
       names.sort((a, b) =>
-        a === "opencode.db" ? -1 : b === "opencode.db" ? 1 : a.localeCompare(b),
+        a === `${provider}.db` ? -1 : b === `${provider}.db` ? 1 : a.localeCompare(b),
       ),
     ),
     Effect.catchTags({
@@ -219,11 +229,15 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
           for (const row of rows) {
             append(
               file.records,
-              parseOpenCodeMessage(text(row.data), {
-                id: text(row.id),
-                sessionId: text(row.session_id),
-                ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
-              }),
+              parseOpenCodeMessage(
+                text(row.data),
+                {
+                  id: text(row.id),
+                  sessionId: text(row.session_id),
+                  ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
+                },
+                provider,
+              ),
             );
           }
           if (rows.length < MESSAGE_PAGE_SIZE) break;
@@ -244,7 +258,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
 
   // Do not follow symlinks, including cycles. Database records win over their
   // old JSON copies when OpenCode has migrated a store in place.
-  const directories = [path.join(root, "storage", "message")];
+  const directories = options.databaseFile ? [] : [path.join(root, "storage", "message")];
   while (directories.length > 0) {
     const directory = directories.pop()!;
     yield* Effect.gen(function* () {
@@ -284,7 +298,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
             // A message cannot be created after its file was last written, so a
             // file untouched since the window opened holds nothing in range.
             const skip =
-              seen.has(`opencode:${id}`) ||
+              seen.has(`${provider}:${id}`) ||
               Option.exists(info.mtime, (mtime) => mtime.getTime() < sinceMs);
             // A skipped file only matters as proof that the store exists.
             if (found && skip) continue;
@@ -294,7 +308,9 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
             const file = { path: entry, records: [] as UsageRecord[] };
             files.push(file);
             yield* fileSystem.readFileString(entry).pipe(
-              Effect.map((source) => append(file.records, parseOpenCodeMessage(source, { id }))),
+              Effect.map((source) =>
+                append(file.records, parseOpenCodeMessage(source, { id }, provider)),
+              ),
               Effect.catchTags({
                 PlatformError: (cause) => {
                   if (!isNotFound(cause)) error = true;

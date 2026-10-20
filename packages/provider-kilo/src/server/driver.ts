@@ -38,6 +38,8 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "@t3tools/provider-core/server/snapshotSettings";
+import { kiloUsageReader } from "./usage.ts";
+
 const decodeKiloSettings = Schema.decodeSync(KiloSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("kilo");
@@ -83,7 +85,11 @@ const withInstanceIdentity =
     continuation: { groupKey: input.continuationGroupKey },
   });
 
-export const KiloDriver: ProviderDriver<KiloSettings, KiloDriverEnv> = {
+export const KiloDriver: ProviderDriver<
+  KiloSettings,
+  KiloDriverEnv,
+  FileSystem.FileSystem | Path.Path
+> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Kilo Code",
@@ -91,6 +97,7 @@ export const KiloDriver: ProviderDriver<KiloSettings, KiloDriverEnv> = {
   },
   configSchema: KiloSettings,
   defaultConfig: (): KiloSettings => decodeKiloSettings({}),
+  usage: kiloUsageReader,
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;

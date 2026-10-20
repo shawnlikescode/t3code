@@ -1008,6 +1008,98 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
+  it.live.each(["default", "xdg", "database", "shared-directory"] as const)(
+    "includes Kilo tokens and reported costs from %s storage without counting aliases twice",
+    (storage) =>
+      Effect.gen(function* () {
+        const { settings, home } = yield* setup;
+        const dataHome =
+          storage === "xdg"
+            ? NodePath.join(home, "custom-data")
+            : NodePath.join(home, ".local", "share");
+        const root = NodePath.join(dataHome, "kilo");
+        const filename =
+          storage === "database"
+            ? NodePath.join(home, "custom-db", "history.sqlite")
+            : NodePath.join(root, "kilo.db");
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(NodePath.dirname(filename), { recursive: true });
+          const db = new NodeSqlite.DatabaseSync(filename);
+          try {
+            db.exec(
+              "PRAGMA journal_mode=WAL; CREATE TABLE message (id TEXT, session_id TEXT, data TEXT, time_created INTEGER)",
+            );
+            const message = {
+              role: "assistant",
+              modelID: "openai/gpt-6.1-sol",
+              providerID: "kilo",
+              time: { created: Date.parse("2026-08-01T10:00:00Z") },
+              cost: 0.25,
+              tokens: { input: 10, output: 5, reasoning: 2, cache: { read: 20, write: 3 } },
+            };
+            db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run(
+              "msg-kilo",
+              "ses-kilo",
+              JSON.stringify(message),
+              message.time.created,
+            );
+          } finally {
+            db.close();
+          }
+        });
+        const environment =
+          storage === "xdg"
+            ? { XDG_DATA_HOME: dataHome }
+            : storage === "database"
+              ? { KILO_DB: filename }
+              : {};
+        const service = yield* UsageService.make.pipe(
+          Effect.provide(
+            layerService({
+              prefix: "usage-service-kilo",
+              home,
+              settings: {
+                ...settings,
+                providerInstances: {
+                  ...settings.providerInstances,
+                  [ProviderInstanceId.make("kilo-alias")]: {
+                    driver: ProviderDriverKind.make("kilo"),
+                    config: {},
+                    environment: Object.entries(
+                      storage === "shared-directory" ? { KILO_DB: filename } : environment,
+                    ).map(([name, value]) => ({
+                      name,
+                      value,
+                    })),
+                  },
+                },
+              },
+              environment,
+            }),
+          ),
+        );
+        const summary = yield* service.readSummary(WINDOW);
+        const kilo = summary.buckets.filter((bucket) => bucket.provider === "kilo");
+        assert.equal(kilo.length, 1);
+        assert.equal(kilo[0]?.records, 1);
+        assert.equal(kilo[0]?.costUsd, 0.25);
+        assert.equal(kilo[0]?.costSource, "providerReported");
+        assert.deepEqual(kilo[0]?.totals, {
+          uncachedInputTokens: 10,
+          cachedInputTokens: 20,
+          cacheCreationTokens: 3,
+          outputTokens: 7,
+          reasoningTokens: 2,
+        });
+        assert.equal(
+          summary.sources.filter(
+            (source) => source.fingerprint.provider === "kilo" && source.status === "ok",
+          ).length,
+          1,
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.live("counts aliased OpenCode and Antigravity directories once", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

@@ -46,6 +46,10 @@
     "./server/adapter": {
       "types": "./src/server/adapter.ts",
       "import": "./src/server/adapter.ts"
+    },
+    "./server/usage": {
+      "types": "./src/server/usage.ts",
+      "import": "./src/server/usage.ts"
     }
   },
   "scripts": {
