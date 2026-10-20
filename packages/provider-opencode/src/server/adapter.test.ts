@@ -150,6 +150,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   client: object,
   queuedPrompt = false,
   allowBackgroundApprovals = false,
+  taskCompletionNotifications = false,
 ) {
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
@@ -164,6 +165,8 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     settings: OPEN_CODE_TEST_SETTINGS,
     environment: {},
     promptRequiresAssistantAcknowledgement: queuedPrompt,
+    taskCompletionNotifications,
+    recoverableContextOverflowErrors: taskCompletionNotifications,
     ...(allowBackgroundApprovals
       ? { autoApprovePermission: (request) => !request.metadata.skillShell }
       : {}),
@@ -192,6 +195,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   const startTurn = (
     text = "hello",
     startProviderThread: OrchestrationV2ProviderThread = providerThread,
+    ordinal = 1,
   ) =>
     runtime.startTurn({
       appThread: {
@@ -219,9 +223,11 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
       },
       threadId,
       runId: RunId.make(`run-opencode-${suffix}`),
-      runOrdinal: 1,
-      providerTurnOrdinal: 1,
-      attemptId: RunAttemptId.make(`attempt-opencode-${suffix}`),
+      runOrdinal: ordinal,
+      providerTurnOrdinal: ordinal,
+      attemptId: RunAttemptId.make(
+        `attempt-opencode-${suffix}${ordinal === 1 ? "" : `-${ordinal}`}`,
+      ),
       rootNodeId: NodeId.make(`node-opencode-${suffix}`),
       providerThread: startProviderThread,
       message: {
@@ -740,7 +746,23 @@ describe("OpenCodeAdapterV2", () => {
   // Event order from a live OpenCode 1.18.32 run of a `task` call with
   // background=true: the task part completes at launch, the root session
   // settles, and the child session stays busy until its own work ends.
-  it.effect("reports a background task child as pending work after the root turn settles", () =>
+  it.effect.each([
+    "tool",
+    "synthetic",
+    "late-title",
+    "error",
+    "child-aborted",
+    "child-error",
+    "early-busy",
+    "delayed-prior",
+    "extended-job",
+    "stop",
+    "running-receipt",
+    "literal-replay",
+    "wrong-parent",
+    "user-lookalike",
+    "open-code",
+  ] as const)("reports background completion after the root settles, route=%s", (route) =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
       const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
@@ -762,7 +784,12 @@ describe("OpenCodeAdapterV2", () => {
           session: {
             create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
             get: async () => ({
-              data: { id: child, parentID: root, permission: [], time: { created: 2, updated: 2 } },
+              data: {
+                id: child,
+                parentID: root,
+                permission: [],
+                time: { created: 2, updated: 2 },
+              },
             }),
             update: async () => ({ data: { id: child, parentID: root } }),
             promptAsync: async (input: { messageID: string }) => {
@@ -770,11 +797,14 @@ describe("OpenCodeAdapterV2", () => {
               return { data: true };
             },
             abort: async () => ({ data: true }),
-            children: async () => ({ data: [] }),
+            children: async ({ sessionID }: { sessionID: string }) => ({
+              data: sessionID === root ? [{ id: child }] : [],
+            }),
           },
         },
         false,
         true,
+        route !== "open-code",
       );
       const hasPendingBackgroundWork = harness.runtime.hasPendingBackgroundWork;
       if (hasPendingBackgroundWork === undefined) {
@@ -786,12 +816,21 @@ describe("OpenCodeAdapterV2", () => {
         Stream.runCollect,
         Effect.forkScoped,
       );
-      const taskPart = (status: "running" | "completed", output = "Background task started") => ({
+      const taskPart = (
+        status: "running" | "completed",
+        output = "Background task started",
+        id = "prt_task",
+        description = id === "prt_task"
+          ? "Current task"
+          : id === "prt_update"
+            ? "Additional context"
+            : "Prior task",
+      ) => ({
         type: "message.part.updated",
         properties: {
           sessionID: root,
           part: {
-            id: "prt_task",
+            id,
             sessionID: root,
             messageID: "msg_root_assistant",
             type: "tool",
@@ -800,11 +839,11 @@ describe("OpenCodeAdapterV2", () => {
             state: {
               status,
               input: {
-                description: "Background sleep task",
+                description,
                 prompt: "sleep",
                 subagent_type: "general",
               },
-              title: "Background sleep task",
+              title: description,
               metadata: { parentSessionId: root, sessionId: child, background: true },
               time: { start: 3, ...(status === "completed" ? { end: 3 } : {}) },
               ...(status === "completed" ? { output } : {}),
@@ -825,7 +864,17 @@ describe("OpenCodeAdapterV2", () => {
         },
       });
       yield* push(status(root, "busy"));
-      yield* push(taskPart("running"));
+      if (route === "early-busy") yield* push(status(child, "busy"));
+      yield* push(
+        taskPart(
+          "completed",
+          `<task id="${child}" state="${route === "delayed-prior" ? "running" : "completed"}"><summary>Background task started</summary><task_result>PRIOR_TASK_DONE</task_result></task>`,
+          "prt_prior_task",
+        ),
+      );
+      yield* push(
+        taskPart("running", undefined, "prt_task", route === "late-title" ? "" : "Current task"),
+      );
       yield* push({
         type: "session.created",
         properties: {
@@ -833,8 +882,16 @@ describe("OpenCodeAdapterV2", () => {
           info: { id: child, parentID: root, time: { created: 2, updated: 2 } },
         },
       });
-      yield* push(status(child, "busy"));
-      yield* push(taskPart("completed"));
+      if (route !== "early-busy") yield* push(status(child, "busy"));
+      if (route !== "running-receipt") yield* push(taskPart("completed"));
+      if (route === "extended-job")
+        yield* push(
+          taskPart(
+            "completed",
+            `<task id="${child}" state="running"><summary>Background task updated</summary><task_result>Additional context sent</task_result></task>`,
+            "prt_update",
+          ),
+        );
       yield* push(status(root, "idle"));
       const received = yield* Fiber.join(terminal);
       assert.equal(received.at(-1)?.type, "turn.terminal");
@@ -895,25 +952,385 @@ describe("OpenCodeAdapterV2", () => {
         2,
         "human approval stays visible and answerable after the parent ends",
       );
+      if (route === "delayed-prior") {
+        const oldResult = yield* harness.runtime.events.pipe(
+          Stream.filter(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          ),
+          Stream.runHead,
+          Effect.forkScoped,
+        );
+        yield* push({
+          type: "message.part.updated",
+          properties: {
+            sessionID: root,
+            part: {
+              id: "prior-notification",
+              sessionID: root,
+              messageID: "old-notice",
+              type: "text",
+              synthetic: true,
+              text: `<task id="${child}" state="completed"><summary>Background task completed: Prior task</summary><task_result>PRIOR_TASK_DONE</task_result></task>`,
+            },
+          },
+        });
+        const old = Option.getOrThrow(yield* Fiber.join(oldResult));
+        if (old.type === "subagent.updated")
+          assert.equal(old.subagent.nativeTaskRef?.nativeId, "prt_prior_task");
+      }
+      const extensionResult =
+        route === "extended-job"
+          ? yield* harness.runtime.events.pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "subagent.updated" &&
+                  event.subagent.nativeTaskRef?.nativeId === "prt_update" &&
+                  event.subagent.status === "completed",
+              ),
+              Stream.runHead,
+              Effect.forkScoped,
+            )
+          : null;
       const lateResult = yield* harness.runtime.events.pipe(
         Stream.filter(
-          (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          (event) =>
+            event.type === "subagent.updated" &&
+            ["completed", "failed", "interrupted"].includes(event.subagent.status),
         ),
         Stream.runHead,
         Effect.forkScoped,
       );
-      yield* push(status(child, "idle"));
-      yield* push({ type: "session.idle", properties: { sessionID: child } });
+      if (!["child-aborted", "child-error"].includes(route)) {
+        yield* push(status(child, "idle"));
+        yield* push({ type: "session.idle", properties: { sessionID: child } });
+      }
+      const notice = `<task id="${child}" state="${route === "error" ? "error" : "completed"}">${route === "late-title" ? "<summary>Background task completed: Current task</summary>" : ""}<task_result>CHILD_DONE</task_result></task>`;
+      if (["child-aborted", "child-error"].includes(route)) {
+        yield* push({
+          type: "session.error",
+          properties: {
+            sessionID: child,
+            error: {
+              name: route === "child-error" ? "UnknownError" : "MessageAbortedError",
+              data: { message: "Task aborted" },
+            },
+          },
+        });
+      } else if (route === "stop") {
+        const rootTerminal = received.find((event) => event.type === "turn.terminal");
+        if (!rootTerminal || rootTerminal.type !== "turn.terminal")
+          return yield* Effect.die("Missing root terminal");
+        yield* harness.runtime.interruptTurn({
+          providerThread: harness.providerThread,
+          providerTurnId: rootTerminal.providerTurnId,
+          requestRuntimeRestart: true,
+        });
+      } else if (route !== "tool") {
+        yield* push({
+          type: "message.part.updated",
+          properties: {
+            sessionID: route === "wrong-parent" ? "unrelated-session" : root,
+            part: {
+              id: "completion-notification",
+              sessionID: route === "wrong-parent" ? "unrelated-session" : root,
+              messageID: "completion-user",
+              type: "text",
+              synthetic: route !== "user-lookalike",
+              text: notice,
+            },
+          },
+        });
+      }
+      // A later ordinary tool result is a deterministic barrier. Without
+      // notification handling this becomes the first completion instead.
       yield* push(taskPart("completed", "CHILD_DONE"));
-      assert.isTrue(
-        Option.isSome(yield* Fiber.join(lateResult)),
-        "the background result must reach its settled parent",
-      );
+      const completion = Option.getOrThrow(yield* Fiber.join(lateResult));
+      assert.equal(completion.type, "subagent.updated");
+      if (completion.type === "subagent.updated") {
+        assert.equal(
+          completion.subagent.nativeTaskRef?.nativeId,
+          "prt_task",
+          "completion belongs to the current task, not a prior task on the reused child",
+        );
+        assert.equal(
+          completion.subagent.result,
+          ["child-aborted", "child-error"].includes(route)
+            ? "Task aborted"
+            : route === "stop"
+              ? "Background task stopped."
+              : [
+                    "synthetic",
+                    "late-title",
+                    "error",
+                    "running-receipt",
+                    "literal-replay",
+                    "early-busy",
+                    "delayed-prior",
+                    "extended-job",
+                  ].includes(route)
+                ? notice
+                : "CHILD_DONE",
+        );
+      }
+      if (completion.type === "subagent.updated")
+        assert.equal(
+          completion.subagent.status,
+          ["error", "child-error"].includes(route)
+            ? "failed"
+            : ["child-aborted", "stop"].includes(route)
+              ? "interrupted"
+              : "completed",
+        );
+      if (route === "literal-replay") {
+        const replay = yield* harness.runtime.events.pipe(
+          Stream.filter((event) => event.type === "subagent.updated"),
+          Stream.runHead,
+          Effect.forkScoped,
+        );
+        yield* push(taskPart("completed", "Background task started"));
+        const after = Option.getOrThrow(yield* Fiber.join(replay));
+        if (after.type === "subagent.updated") {
+          assert.equal(after.subagent.status, "completed");
+          assert.equal(after.subagent.result, notice);
+        }
+      }
+      if (extensionResult) {
+        yield* push(taskPart("completed", "FALLBACK_UPDATE_DONE", "prt_update"));
+        const updated = Option.getOrThrow(yield* Fiber.join(extensionResult));
+        if (updated.type === "subagent.updated") assert.equal(updated.subagent.result, notice);
+      }
       assert.isFalse(yield* hasPendingBackgroundWork, "an idle child must not pin idle release");
     }).pipe(
       Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
       Effect.scoped,
     ),
+  );
+
+  it.effect.each([false, true])(
+    "waits for overflow recovery or a terminal assistant error, fatal=%s",
+    (fatal) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const root = "overflow-root";
+        let promptId = "";
+        const error = { name: "ContextOverflowError", data: { message: "Context exceeded" } };
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          "overflow",
+          root,
+          {
+            event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+            session: {
+              create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+              promptAsync: async (input: { messageID: string }) => {
+                promptId = input.messageID;
+                return { data: true };
+              },
+              messages: async () => ({
+                data: [
+                  {
+                    info: {
+                      id: "final-assistant",
+                      sessionID: root,
+                      role: "assistant",
+                      time: { created: 2, completed: 3 },
+                      ...(fatal ? { error } : {}),
+                    },
+                    parts: [],
+                  },
+                ],
+              }),
+              abort: async () => ({ data: true }),
+              children: async () => ({ data: [] }),
+            },
+          },
+          false,
+          false,
+          true,
+        );
+        yield* harness.startTurn();
+        const result = yield* harness.runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
+        yield* push({
+          type: "message.updated",
+          properties: {
+            sessionID: root,
+            info: { id: promptId, sessionID: root, role: "user", time: { created: 1 } },
+          },
+        });
+        yield* push({
+          type: "session.status",
+          properties: { sessionID: root, status: { type: "busy" } },
+        });
+        yield* push({ type: "session.error", properties: { sessionID: root, error } });
+        yield* push({
+          type: "message.part.updated",
+          properties: {
+            sessionID: root,
+            part: {
+              id: "final-text",
+              sessionID: root,
+              messageID: "final-assistant",
+              type: "text",
+              text: "Recovered after compaction",
+              time: { start: 2, end: 3 },
+            },
+          },
+        });
+        yield* push({
+          type: "session.status",
+          properties: { sessionID: root, status: { type: "idle" } },
+        });
+        const events = yield* Fiber.join(result);
+        const terminal = events.findLast((event) => event.type === "turn.terminal");
+        assert.equal(terminal?.status, fatal ? "failed" : "completed");
+        assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
+
+  it.effect.each(["stop", "steer"] as const)(
+    "ignores an overflow idle from before %s and hides synthetic task text",
+    (route) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const root = "stale-overflow-root";
+        let promptId = "";
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          "stale-overflow",
+          root,
+          {
+            event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+            session: {
+              get: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+              create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+              promptAsync: async (input: { messageID: string }) => {
+                promptId = input.messageID;
+                return { data: true };
+              },
+              messages: async () => ({ data: [] }),
+              abort: async () => ({ data: true }),
+              children: async () => ({ data: [] }),
+            },
+          },
+          false,
+          false,
+          true,
+        );
+        const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
+        const admit = () =>
+          push({
+            type: "message.updated",
+            properties: {
+              sessionID: root,
+              info: { id: promptId, sessionID: root, role: "user", time: { created: 1 } },
+            },
+          });
+        yield* harness.startTurn();
+        yield* admit();
+        yield* push({
+          type: "session.error",
+          properties: {
+            sessionID: root,
+            error: { name: "ContextOverflowError", data: { message: "Context exceeded" } },
+          },
+        });
+        const before = yield* harness.runtime.readThreadSnapshot({
+          providerThread: harness.providerThread,
+        });
+        if (route === "stop") {
+          yield* harness.runtime.interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: before.providerTurns.at(-1)!.id,
+            requestRuntimeRestart: true,
+          });
+          yield* push({
+            type: "session.error",
+            properties: {
+              sessionID: root,
+              error: { name: "MessageAbortedError", data: { message: "Stopped" } },
+            },
+          });
+          yield* harness.startTurn("New turn", harness.providerThread, 2);
+        } else {
+          yield* harness.runtime.steerTurn({
+            threadId: harness.threadId,
+            runId: harness.runId,
+            providerThread: harness.providerThread,
+            providerTurnId: before.providerTurns.at(-1)!.id,
+            message: {
+              messageId: MessageId.make("steer-overflow"),
+              text: "Continue with this",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "web",
+            },
+          });
+        }
+        yield* admit();
+        const current = yield* harness.runtime.readThreadSnapshot({
+          providerThread: harness.providerThread,
+        });
+        const eventsFiber = yield* harness.runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn.terminal" &&
+              event.providerTurnId === current.providerTurns.at(-1)!.id,
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* push({ type: "session.idle", properties: { sessionID: root } });
+        const after = yield* harness.runtime.readThreadSnapshot({
+          providerThread: harness.providerThread,
+        });
+        assert.equal(after.providerTurns.at(-1)?.status, "running");
+        yield* push({
+          type: "message.part.updated",
+          properties: {
+            sessionID: root,
+            part: {
+              id: "synthetic-task",
+              messageID: "background-user",
+              sessionID: root,
+              type: "text",
+              synthetic: true,
+              text: '<task id="child" state="completed"><task_result>Hidden receipt</task_result></task>',
+            },
+          },
+        });
+        yield* push({
+          type: "message.part.updated",
+          properties: {
+            sessionID: root,
+            part: {
+              id: "visible-text",
+              messageID: "assistant",
+              sessionID: root,
+              type: "text",
+              text: "Continuing the new request",
+              time: { start: 2, end: 3 },
+            },
+          },
+        });
+        yield* push({ type: "session.idle", properties: { sessionID: root } });
+        const events = yield* Fiber.join(eventsFiber);
+        const messages = events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+            ? [event.turnItem.text]
+            : [],
+        );
+        assert.isTrue(messages.some((text) => text.includes("Continuing the new request")));
+        assert.isFalse(messages.some((text) => text.includes("<task")));
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
   );
 
   it.effect("does not resurrect compacted background launch receipts as live subagents", () =>

@@ -50,9 +50,12 @@ export const makeKiloSdkAdapter = Effect.fn("makeKiloSdkAdapter")(function* (
     provider: ProviderDriverKind.make("kilo"),
     defaultAgent: "code",
     promptRequiresAssistantAcknowledgement: true,
+    taskCompletionNotifications: true,
+    recoverableContextOverflowErrors: true,
     interactivePermissionReplies: true,
     sessionEnvironment: (policy) => ({
       ...enforceKiloInteractiveModeEnvironment(options.environment, policy.runtimeMode),
+      KILO_SERVER_USERNAME: "kilo",
       KILO_SERVER_PASSWORD: password,
       OPENCODE_SERVER_PASSWORD: password,
     }),

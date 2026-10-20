@@ -56,6 +56,7 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
           NodeFSP.writeFile(NodePath.join(cwd, ".env.schema"), "FIXTURE_ONLY=child-read-ok\n"),
         );
         let requests = 0;
+        let injectedOverflow = false;
         let childRead = false;
         const models: string[] = [];
         let releaseBusySteering = () => {};
@@ -81,6 +82,21 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
           };
           requests += 1;
           models.push(body.model);
+          if (body.model === "overflow" && !injectedOverflow) {
+            injectedOverflow = true;
+            response.writeHead(400, { "Content-Type": "application/json" });
+            response.end(
+              JSON.stringify({
+                error: {
+                  message:
+                    "This model's maximum context length was exceeded. Reduce the length of the messages.",
+                  type: "invalid_request_error",
+                  code: "context_length_exceeded",
+                },
+              }),
+            );
+            return;
+          }
           const child = !(body.tools ?? []).some((tool) => tool.function.name === "task");
           const result = body.messages.find((message) => message.role === "tool");
           if (child && result?.content?.includes("child-read-ok")) childRead = true;
@@ -157,6 +173,7 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
                     description: "Read fixture",
                     prompt: "Read .env.schema",
                     subagent_type: "general",
+                    ...(body.model === "background" ? { background: true } : {}),
                   };
           const legacySeed = JSON.stringify(
             body.messages.findLast((message) => message.role === "user")?.content,
@@ -227,6 +244,8 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
                 models: Object.fromEntries(
                   [
                     "model",
+                    "background",
+                    "overflow",
                     "switched",
                     "interactive",
                     "waiting",
@@ -240,6 +259,7 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
           };
           const environment = {
             ...hardenKiloProbeEnvironment(process.env),
+            KILO_SERVER_USERNAME: "fixture-inherited-username",
             KILO_CONFIG_CONTENT: encodeFixtureConfig(config),
           };
           const instanceId = ProviderInstanceId.make("kilo");
@@ -423,6 +443,32 @@ describe.runIf(process.env.T3_KILO_SDK_PROBE === "1" && isolated)("Kilo native V
             const done = yield* seed.finish();
             expect(done.type === "turn.terminal" && done.status === "completed").toBe(true);
             return seed.providerThread;
+          }).pipe(Effect.scoped);
+          yield* Effect.gen(function* () {
+            const harness = yield* open("overflow", environment);
+            yield* harness.start(
+              "Recover automatically from the fixture context overflow.",
+              "fixture/overflow",
+            );
+            const done = yield* harness.finish();
+            expect(injectedOverflow).toBe(true);
+            expect(done.type === "turn.terminal" && done.status === "completed").toBe(true);
+          }).pipe(Effect.scoped);
+          yield* Effect.gen(function* () {
+            const harness = yield* open("background", environment);
+            yield* harness.start("Run background fixture task.", "fixture/background");
+            yield* harness.finish();
+            yield* harness.waitForChildStop();
+            const completed = harness.events.filter(
+              (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+            );
+            expect(
+              completed.some(
+                (event) =>
+                  event.type === "subagent.updated" &&
+                  event.subagent.result?.includes("CHILD_DONE"),
+              ),
+            ).toBe(true);
           }).pipe(Effect.scoped);
           yield* Effect.gen(function* () {
             const harness = yield* open("native", environment, legacy);
