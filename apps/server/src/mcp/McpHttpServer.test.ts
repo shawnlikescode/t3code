@@ -7,6 +7,7 @@ import {
   EnvironmentId,
   OrchestratorMcpFailure,
   PreviewTabId,
+  PREVIEW_AUTOMATION_V1_OPERATIONS,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -392,7 +393,7 @@ it.effect("refuses preview tools to a client outside a thread before they run", 
 it.effect("rejects non-boolean snapshot image options before selecting a browser host", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    for (const includeImage of ["false", 0, null]) {
+    for (const includeImage of ["false", 0]) {
       const result = yield* server
         .callTool({
           name: "preview_snapshot",
@@ -843,6 +844,7 @@ it.effect("registers annotated tools and preserves authenticated request context
       const events = yield* broker.connect({
         clientId: "mcp-test-client",
         environmentId,
+        supportedOperations: [...PREVIEW_AUTOMATION_V1_OPERATIONS, "resize"],
       });
       yield* Stream.runForEach(events, (event) => {
         if (event.type === "connected") return Effect.void;
@@ -853,20 +855,26 @@ it.effect("registers annotated tools and preserves authenticated request context
           requestId: event.request.requestId,
           ok: true,
           result:
-            event.request.operation === "snapshot"
-              ? snapshotResult
-              : event.request.operation === "evaluate"
-                ? ["Connect", "Continue"]
-                : event.request.operation === "press"
-                  ? undefined
-                  : {
-                      available: true,
-                      visible: true,
-                      tabId,
-                      url: "http://example.test/",
-                      title: "Example",
-                      loading: false,
-                    },
+            event.request.operation === "resize"
+              ? {
+                  tabId,
+                  setting: { _tag: "freeform", width: 1920, height: 1080 },
+                  viewport: { width: 1920, height: 1080 },
+                }
+              : event.request.operation === "snapshot"
+                ? snapshotResult
+                : event.request.operation === "evaluate"
+                  ? ["Connect", "Continue"]
+                  : event.request.operation === "press"
+                    ? undefined
+                    : {
+                        available: true,
+                        visible: true,
+                        tabId,
+                        url: "http://example.test/",
+                        title: "Example",
+                        loading: false,
+                      },
         });
       }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
@@ -928,6 +936,31 @@ it.effect("registers annotated tools and preserves authenticated request context
         url: "https://example.com",
         reuseExistingTab: false,
       });
+      for (const arguments_ of [
+        { mode: "freeform", width: 1920, height: 1080, preset: null, orientation: null },
+        {
+          mode: "preset",
+          preset: "iphone-12-pro",
+          orientation: "portrait",
+          width: null,
+          height: null,
+        },
+      ]) {
+        const resized = yield* server
+          .callTool({
+            name: "preview_resize",
+            arguments: { ...arguments_, tabId, timeoutMs: 15000 },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(resized.isError, JSON.stringify(resized)).toBe(false);
+        expect(routedRequests.findLast(({ operation }) => operation === "resize")?.input).toEqual({
+          ...Object.fromEntries(Object.entries(arguments_).filter(([, value]) => value !== null)),
+          timeoutMs: 15000,
+        });
+      }
       const invalidOpen = yield* server
         .callTool({
           name: "preview_open",

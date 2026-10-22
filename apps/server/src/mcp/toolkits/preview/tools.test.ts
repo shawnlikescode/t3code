@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 
 import { PreviewToolkit } from "./tools.ts";
@@ -77,4 +78,77 @@ it("exports exact object result schemas for preview actions", () => {
       description: "The preview action completed successfully.",
     });
   }
+});
+
+const validInputs = {
+  preview_status: {},
+  preview_open: { url: "https://example.com" },
+  preview_dialog: { accept: false },
+  preview_navigate: { url: "https://example.com" },
+  preview_resize: { mode: "freeform", width: 1920, height: 1080 },
+  preview_set_appearance: { colorScheme: "dark" },
+  preview_snapshot: { includeImage: false },
+  preview_click: { locator: "aria-ref=button1" },
+  preview_type: { text: "hello", clear: false },
+  preview_hover: { x: 0, y: 0 },
+  preview_select: { locator: "select", values: [] },
+  preview_drag: { source: "#source", target: "#target" },
+  preview_upload: { paths: [] },
+  preview_press: { key: "Enter" },
+  preview_scroll: { deltaY: 0 },
+  preview_evaluate: { expression: "null" },
+  preview_wait_for: { text: "Ready" },
+  preview_recording_start: {},
+  preview_recording_stop: {},
+} satisfies Record<keyof typeof PreviewToolkit.tools, object>;
+
+it.each(Object.entries(validInputs))(
+  "normalizes strict-client optional nulls for %s",
+  (name, input) => {
+    const tool = PreviewToolkit.tools[name as keyof typeof PreviewToolkit.tools];
+    const json = Tool.getJsonSchema(tool) as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    const nullable = Object.fromEntries(
+      Object.keys(json.properties)
+        .filter((field) => !json.required?.includes(field))
+        .map((field) => [field, null]),
+    );
+    const decode = Schema.decodeUnknownSync(
+      tool.parametersSchema as Schema.Codec<unknown, unknown>,
+    );
+    expect(decode({ ...nullable, ...input })).toEqual(input);
+  },
+);
+
+it.each([
+  { mode: "preset", preset: "iphone-12-pro", orientation: "portrait", width: null, height: null },
+  { mode: "fill", preset: null, orientation: null, width: null, height: null },
+])("accepts nullable unused resize fields for $mode", (input) => {
+  const decode = Schema.decodeUnknownSync(PreviewToolkit.tools.preview_resize.parametersSchema);
+  expect(decode(input)).toEqual(
+    Object.fromEntries(Object.entries(input).filter(([, value]) => value !== null)),
+  );
+});
+
+it.each([
+  ["preview_resize", { mode: "freeform", width: 1920, height: 1080, preset: "iphone-se" }],
+  ["preview_resize", { mode: "freeform", width: 1920, height: 1080, orientation: "portrait" }],
+  ["preview_resize", { mode: "preset", preset: "iphone-se", width: 320, height: 568 }],
+  ["preview_resize", { mode: "freeform", width: -1, height: 1080 }],
+  ["preview_resize", { mode: "freeform", width: null, height: 1080 }],
+  ["preview_resize", { mode: null }],
+  ["preview_click", { locator: "button", selector: "button" }],
+  [
+    "preview_navigate",
+    { url: "https://example.com", target: { kind: "environment-port", port: 5173 } },
+  ],
+  ["preview_wait_for", { text: null }],
+  ["preview_scroll", { deltaY: null }],
+  ["preview_evaluate", { expression: null }],
+  ["preview_dialog", { accept: null }],
+] as const)("retains original validation for %s: %j", (name, input) => {
+  const schema = PreviewToolkit.tools[name].parametersSchema as Schema.Codec<unknown, unknown>;
+  expect(() => Schema.decodeUnknownSync(schema)(input)).toThrow();
 });
