@@ -28,7 +28,7 @@ export const makeKiloSdkAdapter = Effect.fn("makeKiloSdkAdapter")(function* (
   >,
 ) {
   const host = yield* ProviderHost.ProviderHost;
-  const password = yield* (yield* Crypto.Crypto).randomUUIDv4;
+  const password = yield* (yield* Crypto.Crypto).randomUUIDv4();
   const runtime = yield* OpenCodeRuntime.makeOpenCodeRuntime({
     serverRequirement: { name: "Kilo", minimumVersion: "7.4.23" },
     createClient: (input) =>

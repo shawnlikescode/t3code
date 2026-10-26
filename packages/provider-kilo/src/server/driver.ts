@@ -98,138 +98,141 @@ export const KiloDriver: ProviderDriver<
   configSchema: KiloSettings,
   defaultConfig: (): KiloSettings => decodeKiloSettings({}),
   usage: kiloUsageReader,
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
-    Effect.gen(function* () {
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const httpClient = yield* HttpClient.HttpClient;
-      const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-      const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
-        driverKind: DRIVER_KIND,
-        instanceId,
-      });
-      const stampIdentity = withInstanceIdentity({
-        instanceId,
-        displayName,
-        accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
-      });
-      const effectiveConfig = { ...config, enabled } satisfies KiloSettings;
-      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-        resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-          binaryPath: effectiveConfig.binaryPath,
-          env: processEnv,
-        }).pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(FileSystem.FileSystem, yield* FileSystem.FileSystem),
-          Effect.provideService(Path.Path, yield* Path.Path),
-        ),
-      );
-
-      const orchestrationAdapter = yield* makeKiloSdkAdapter(effectiveConfig, {
-        environment: processEnv,
-        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
-        instanceId,
+  create: Effect.fn("KiloDriver.create")(function* ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    enabled,
+    config,
+  }) {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const httpClient = yield* HttpClient.HttpClient;
+    const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+    const eventLoggers = yield* ProviderEventLoggers;
+    const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+    const continuationIdentity = defaultProviderContinuationIdentity({
+      driverKind: DRIVER_KIND,
+      instanceId,
+    });
+    const stampIdentity = withInstanceIdentity({
+      instanceId,
+      displayName,
+      accentColor,
+      continuationGroupKey: continuationIdentity.continuationKey,
+    });
+    const effectiveConfig = { ...config, enabled } satisfies KiloSettings;
+    const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
+      resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+        binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
       }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to initialize Kilo native adapter.",
-              cause,
-            }),
-        ),
-      );
-      const checkProvider = checkKiloProviderStatus(effectiveConfig, processEnv).pipe(
-        Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      );
+        Effect.provideService(FileSystem.FileSystem, yield* FileSystem.FileSystem),
+        Effect.provideService(Path.Path, yield* Path.Path),
+      ),
+    );
 
-      const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<KiloSettings>>({
-        resolveMaintenance,
-        getSettings: snapshotSettings.getSettings,
-        streamSettings: snapshotSettings.streamSettings,
-        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
-        initialSnapshot: (settings) =>
-          buildInitialKiloProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
-        checkProvider,
-        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-          resolveMaintenance()
-            .pipe(
-              Effect.flatMap((maintenanceCapabilities) =>
-                enrichKiloSnapshot({
-                  snapshot: currentSnapshot,
-                  maintenanceCapabilities,
-                  enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-                  publishSnapshot,
-                  httpClient,
-                }),
-              ),
-            )
-            .pipe(
-              Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
-            ),
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Kilo snapshot.",
-              cause,
+    const orchestrationAdapter = yield* makeKiloSdkAdapter(effectiveConfig, {
+      environment: processEnv,
+      ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+      instanceId,
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to initialize Kilo native adapter.",
+            cause,
+          }),
+      ),
+    );
+    const checkProvider = checkKiloProviderStatus(effectiveConfig, processEnv).pipe(
+      Effect.map(stampIdentity),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+
+    const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
+    const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<KiloSettings>>({
+      resolveMaintenance,
+      getSettings: snapshotSettings.getSettings,
+      streamSettings: snapshotSettings.streamSettings,
+      haveSettingsChanged: haveProviderSnapshotSettingsChanged,
+      initialSnapshot: (settings) =>
+        buildInitialKiloProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+      checkProvider,
+      enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
+        resolveMaintenance().pipe(
+          Effect.flatMap((maintenanceCapabilities) =>
+            enrichKiloSnapshot({
+              snapshot: currentSnapshot,
+              maintenanceCapabilities,
+              enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              publishSnapshot,
+              httpClient,
             }),
+          ),
+          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
         ),
-      );
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to build Kilo snapshot.",
+            cause,
+          }),
+      ),
+    );
 
-      return {
-        instanceId,
-        driverKind: DRIVER_KIND,
-        continuationIdentity,
-        displayName,
-        accentColor,
-        enabled,
-        snapshot,
-        orchestrationAdapter,
-        textGeneration: {
-          generateCommitMessage: () =>
-            Effect.fail(
-              new TextGenerationError({
-                operation: "generateCommitMessage",
-                detail: "Kilo does not support application text generation.",
-              }),
-            ),
-          generatePrContent: () =>
-            Effect.fail(
-              new TextGenerationError({
-                operation: "generatePrContent",
-                detail: "Kilo does not support application text generation.",
-              }),
-            ),
-          generateBranchName: () =>
-            Effect.fail(
-              new TextGenerationError({
-                operation: "generateBranchName",
-                detail: "Kilo does not support application text generation.",
-              }),
-            ),
-          generateThreadTitle: () =>
-            Effect.fail(
-              new TextGenerationError({
-                operation: "generateThreadTitle",
-                detail: "Kilo does not support application text generation.",
-              }),
-            ),
-          generateReviewGuide: () =>
-            Effect.fail(
-              new TextGenerationError({
-                operation: "generateReviewGuide",
-                detail: "Kilo does not support application text generation.",
-              }),
-            ),
-        },
-      } satisfies ProviderInstance;
-    }),
+    return {
+      instanceId,
+      driverKind: DRIVER_KIND,
+      continuationIdentity,
+      displayName,
+      accentColor,
+      enabled,
+      snapshot,
+      orchestrationAdapter,
+      textGeneration: {
+        generateCommitMessage: () =>
+          Effect.fail(
+            new TextGenerationError({
+              operation: "generateCommitMessage",
+              detail: "Kilo does not support application text generation.",
+            }),
+          ),
+        generatePrContent: () =>
+          Effect.fail(
+            new TextGenerationError({
+              operation: "generatePrContent",
+              detail: "Kilo does not support application text generation.",
+            }),
+          ),
+        generateBranchName: () =>
+          Effect.fail(
+            new TextGenerationError({
+              operation: "generateBranchName",
+              detail: "Kilo does not support application text generation.",
+            }),
+          ),
+        generateThreadTitle: () =>
+          Effect.fail(
+            new TextGenerationError({
+              operation: "generateThreadTitle",
+              detail: "Kilo does not support application text generation.",
+            }),
+          ),
+        generateReviewGuide: () =>
+          Effect.fail(
+            new TextGenerationError({
+              operation: "generateReviewGuide",
+              detail: "Kilo does not support application text generation.",
+            }),
+          ),
+      },
+    } satisfies ProviderInstance;
+  }),
 };

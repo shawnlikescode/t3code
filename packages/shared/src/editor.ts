@@ -19,9 +19,7 @@ const installNames: Partial<Record<Editor["id"], ReadonlyArray<string>>> = {
   rider: ["Rider", "JetBrains Rider"],
 };
 
-/** True for `<name> <version>.app`, where the version is digits and dots (`IntelliJ IDEA 2026.1.4.app`).
- * A plain prefix match would let one editor steal another's bundle, e.g. stable VS Code resolving to
- * `Visual Studio Code - Insiders.app`. */
+// Prefix-only matches could select Insiders when resolving stable VS Code.
 const isVersionedBundle = (entry: string, name: string) => {
   if (!entry.startsWith(`${name} `) || !entry.endsWith(".app")) return false;
   return /^\d[\d.]*$/.test(entry.slice(name.length + 1, -".app".length));
@@ -33,11 +31,15 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
 ) {
   if (editor.commands === null) return Option.none();
   const baseArgs = "baseArgs" in editor ? editor.baseArgs : [];
-  for (const command of editor.commands) {
-    if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
+  const platform = yield* HostProcess.Platform;
+  // Prefer Zed's macOS bundle because OpenZFS also installs a zed executable.
+  const preferBundle = platform === "darwin" && editor.id === "zed";
+  if (!preferBundle) {
+    for (const command of editor.commands) {
+      if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
+    }
   }
 
-  const platform = yield* HostProcess.Platform;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const home = env.HOME;
@@ -49,9 +51,7 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
   if (platform === "darwin") {
     const roots = [...(home ? [path.join(home, "Applications")] : []), "/Applications"];
     for (const root of roots) {
-      // JetBrains Toolbox installs bundles named after the app and its version
-      // (`IntelliJ IDEA 2026.1.4.app`), so list the directory and accept
-      // `<name> <version>.app` as well as the exact `<name>.app`.
+      // JetBrains Toolbox appends versions to bundle names; accept exact and versioned names.
       const entries = yield* fs.readDirectory(root).pipe(Effect.orElseSucceed(() => []));
       const bundles = new Set(names.map((name) => `${name}.app`));
       for (const entry of entries) {
@@ -134,6 +134,7 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
     }
   }
 
+  if (preferBundle) candidates.push(...editor.commands);
   for (const candidate of candidates) {
     if (yield* isCommandAvailable(candidate, { env })) {
       return Option.some({

@@ -89,7 +89,7 @@ export const make = Effect.gen(function* () {
           "relay.delivery.kind": input.kind,
         });
         const now = yield* DateTime.now;
-        const jobId = yield* crypto.randomUUIDv4.pipe(
+        const jobId = yield* crypto.randomUUIDv4().pipe(
           Effect.mapError(
             (cause) =>
               new ApnsDeliveryQueueSendError({
@@ -148,7 +148,7 @@ export const make = Effect.gen(function* () {
           "relay.thread_id": input.notification.threadId,
         });
         const now = yield* DateTime.now;
-        const jobId = yield* crypto.randomUUIDv4.pipe(
+        const jobId = yield* crypto.randomUUIDv4().pipe(
           Effect.mapError(
             (cause) =>
               new ApnsDeliveryQueueSendError({
@@ -217,10 +217,12 @@ export const layerCloudflareQueues = (
       Layer.succeed(
         ApnsDeliveryQueueSender,
         ApnsDeliveryQueueSender.of({
-          send: (body) =>
-            sender
-              .send(body)
-              .pipe(Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext)),
+          send: Effect.fn("ApnsDeliveryQueueSender.send")(
+            function* (body) {
+              return yield* sender.send(body);
+            },
+            Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
+          ),
         }),
       ),
     ),

@@ -1,16 +1,17 @@
+import { MISSING_FILE_ACCESS_MESSAGE } from "@t3tools/client-runtime/state/assets";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { Image } from "expo-image";
 import { createContext, useContext, useEffect, useEffectEvent, useId, useState } from "react";
 import { fetch } from "expo/fetch";
 import { parse, SvgAst, type JsxAST } from "react-native-svg";
-import { ActivityIndicator, Pressable, StyleSheet, View, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, View, type ViewStyle } from "react-native";
 
-import { AppActivityIndicator } from "../../components/AppActivityIndicator";
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useFilePreviewGallery } from "../../components/FilePreviewGallery";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
 import { MediaActionsMenu } from "../../components/MediaActionsMenu";
-import { PresentationSource } from "../../components/NativePresentation";
+import { PresentationSource } from "../../components/ui/NativePresentation";
 import { useMediaActions } from "../../state/mediaActions";
 import type { MediaActionsSource } from "../../lib/mediaActionsSource";
 import { useAssetUrlState } from "../../state/assets";
@@ -21,22 +22,15 @@ import {
   resolveSvgImageSize,
 } from "./markdownImageSize";
 
-/**
- * Width the feed lays markdown out in. The feed already knows this from its
- * viewport, so an image can size its frame on the first render instead of
- * waiting for its own onLayout, which would change the row's height once
- * more after the list has positioned the rows below it. It is an upper
- * bound: a list item or blockquote indents its column, and the measured
- * width takes over once it is known.
- */
+/** Use known feed width immediately; later image measurement would move already-positioned rows. */
 export const MarkdownImageAvailableWidthContext = createContext(0);
 
 export function ThreadMarkdownImageView(props: {
   readonly uri: string | null;
   readonly sourceKey: string;
   readonly unavailable: boolean;
+  readonly unavailableDetail?: string | undefined;
   readonly alt: string | null;
-  /** Pixel size from the server, when it could read the header; the frame is final from the first render. */
   readonly knownSize?: { readonly width: number; readonly height: number } | undefined;
   readonly format?: "svg";
   readonly actionsSource?: MediaActionsSource;
@@ -51,19 +45,16 @@ export function ThreadMarkdownImageView(props: {
     measuredWidth > 0 && contextWidth > 0
       ? Math.min(contextWidth, measuredWidth)
       : contextWidth || measuredWidth;
-  const [decodedSize, setDecodedSize] = useState<{ width: number; height: number } | null>(null);
-  const [failedUri, setFailedUri] = useState<string | null>(null);
+  // Keyed by source so a new source drops the previous image's decoded dimensions.
+  const [decoded, setDecoded] = useState<{
+    sourceKey: string;
+    size: { width: number; height: number };
+  } | null>(null);
+  const decodedSize = decoded?.sourceKey === props.sourceKey ? decoded.size : null;
+  // A failure belongs to one URI; any URI change, including through null, retries.
+  const [failure, setFailure] = useState({ uri: props.uri, failed: false });
+  if (failure.uri !== props.uri) setFailure({ uri: props.uri, failed: false });
 
-  useEffect(() => {
-    setDecodedSize(null);
-  }, [props.sourceKey]);
-
-  useEffect(() => {
-    setFailedUri(null);
-  }, [props.uri]);
-
-  // The decoded size is what the platform actually drew, so it wins over the
-  // server's header hint once it exists.
   const sourceSize = decodedSize ?? props.knownSize ?? null;
   const displaySize: MarkdownImageDisplaySize | null =
     sourceSize === null || availableWidth <= 0
@@ -73,7 +64,8 @@ export function ThreadMarkdownImageView(props: {
           sourceHeight: sourceSize.height,
           availableWidth,
         });
-  const failed = props.unavailable || (props.uri !== null && failedUri === props.uri);
+  const failed =
+    props.unavailable || (props.uri !== null && failure.uri === props.uri && failure.failed);
   const placeholderWidth: ViewStyle["width"] =
     availableWidth > 0 ? Math.min(availableWidth, MARKDOWN_IMAGE_MAX_WIDTH) : "100%";
   const frameStyle: ViewStyle = displaySize ?? { width: placeholderWidth, aspectRatio: 16 / 9 };
@@ -95,7 +87,11 @@ export function ThreadMarkdownImageView(props: {
             style={frameStyle}
           >
             {failed ? (
-              <Text className="text-xs text-foreground-muted">Image unavailable</Text>
+              <Text className="px-3 text-center text-xs text-foreground-muted">
+                {props.unavailableDetail
+                  ? `Image unavailable. ${props.unavailableDetail}`
+                  : "Image unavailable"}
+              </Text>
             ) : (
               <AppActivityIndicator />
             )}
@@ -128,11 +124,11 @@ export function ThreadMarkdownImageView(props: {
                 style={frameStyle}
               >
                 <ThreadMarkdownImageRequest
-                  key={props.uri}
+                  key={props.sourceKey}
                   uri={props.uri}
                   format={props.format}
-                  onLoad={setDecodedSize}
-                  onError={() => setFailedUri(props.uri)}
+                  onLoad={(size) => setDecoded({ sourceKey: props.sourceKey, size })}
+                  onError={() => setFailure({ uri: props.uri, failed: true })}
                 />
               </View>
             </Pressable>
@@ -235,7 +231,6 @@ function ThreadMarkdownSvg(props: {
   return <SvgAst ast={ast} override={{ width: "100%", height: "100%", accessible: false }} />;
 }
 
-/** Environment-hosted image that loads through a signed asset URL. */
 export function ThreadMarkdownImage(props: {
   readonly environmentId: EnvironmentId;
   readonly resource: Extract<
@@ -261,6 +256,11 @@ export function ThreadMarkdownImage(props: {
             : `workspace:${props.resource.path}`
       }
       unavailable={assetUrl._tag === "Failure"}
+      unavailableDetail={
+        assetUrl._tag === "Failure" && assetUrl.reason === "missing-file-access"
+          ? MISSING_FILE_ACCESS_MESSAGE
+          : undefined
+      }
       knownSize={assetUrl._tag === "Success" ? assetUrl.imageDimensions : undefined}
       format={
         (props.resource._tag === "media-file" || props.resource._tag === "draft-workspace-file") &&

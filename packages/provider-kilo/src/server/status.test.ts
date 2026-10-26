@@ -8,7 +8,6 @@ import { it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
@@ -321,7 +320,7 @@ describe("KiloProvider", () => {
       const fiber = yield* checkKiloProviderStatus(
         decodeKiloSettings({ enabled: true, binaryPath: "kilo" }),
       ).pipe(
-        Effect.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.forkChild,
       );
       yield* Deferred.await(modelsSpawned);
